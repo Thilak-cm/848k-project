@@ -14,6 +14,7 @@ with open(filename, 'r') as f:
 # get vocab
 vocab = list(sorted(set(text)))
 vocab_size = len(vocab)
+n_emb = 32
 
 # character level encoding and decoding
 stoi = {c: i for i, c in enumerate(vocab)}
@@ -49,14 +50,21 @@ def get_batch(split):
     return x, y
 
 class BigramLanguageModel(nn.Module):
-    def __init__(self, vocab_size):
+    def __init__(self):
         super().__init__()
         # each token directly reads off the logits for the next token in the lookup table
-        self.token_embedding_table = nn.Embedding(vocab_size, vocab_size)
+        self.token_embedding_table = nn.Embedding(vocab_size, n_emb) # W_E in GPT-2
+        self.positional_embedding_table = nn.Embedding(block_size, n_emb) # W_P in GPT-2
+        self.lm_head = nn.Linear(n_emb, vocab_size) # W_o in GPT-2
 
     def forward(self, idx, targets=None):
+        B, T = idx.shape
         # idx and targets are both of shape (batch_size, block_size) aka (B, T)
-        logits = self.token_embedding_table(idx) # Batch x time x channel
+        token_emb = self.token_embedding_table(idx) # Batch x time x channel
+        pos_emb = self.positional_embedding_table(torch.arange(T, device=idx.device)) # time x channel
+        x = token_emb + pos_emb  # add positional embedding to token embedding
+        logits = self.lm_head(x)
+
         if targets is None:
             loss = None
         else:
@@ -82,7 +90,7 @@ class BigramLanguageModel(nn.Module):
             idx = torch.cat([idx, next_tokens], dim=1) # Bx(T+1)
         return idx
 
-model = BigramLanguageModel(vocab_size)
+model = BigramLanguageModel()
 
 @torch.no_grad()
 def estimate_loss():
