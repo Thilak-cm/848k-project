@@ -15,6 +15,7 @@ with open(filename, 'r') as f:
 vocab = list(sorted(set(text)))
 vocab_size = len(vocab)
 n_emb = 32
+device = 'mps' if torch.backends.mps.is_available() else 'cpu'
 
 # character level encoding and decoding
 stoi = {c: i for i, c in enumerate(vocab)}
@@ -60,10 +61,10 @@ class BigramLanguageModel(nn.Module):
     def forward(self, idx, targets=None):
         B, T = idx.shape
         # idx and targets are both of shape (batch_size, block_size) aka (B, T)
-        token_emb = self.token_embedding_table(idx) # Batch x time x channel
-        pos_emb = self.positional_embedding_table(torch.arange(T, device=idx.device)) # time x channel
+        token_emb = self.token_embedding_table(idx) # Batch x time x channel (here channel is now n_emb)
+        pos_emb = self.positional_embedding_table(torch.arange(T)) # time x channel
         x = token_emb + pos_emb  # add positional embedding to token embedding
-        logits = self.lm_head(x)
+        logits = self.lm_head(x) # B, T, vocab size
 
         if targets is None:
             loss = None
@@ -80,14 +81,16 @@ class BigramLanguageModel(nn.Module):
     def generate(self, idx, max_new_tokens):
         # idx is BxT
         for _ in range(max_new_tokens):
-            logits, loss = self(idx)
+            # get the last block_size tokens of the idx
+            idx_cond = idx[:, -block_size:] # BxT
+            logits, loss = self(idx_cond)
             # pluck out last column in time dimension, because this is the generated predictions for what comes next
             logits = logits[:, -1, :] # keep only the last token for each sequence in the batch aka BxC
             probs = F.softmax(logits, dim=-1) # BxC
             # sample from the distribution
-            next_tokens = torch.multinomial(probs, num_samples=1) # Bx1
+            next_token = torch.multinomial(probs, num_samples=1) # Bx1
             # append newly generated token to input idx to obtain new input for next generation iteration
-            idx = torch.cat([idx, next_tokens], dim=1) # Bx(T+1)
+            idx = torch.cat([idx, next_token], dim=-1) # Bx(T+1) # TODO: understand why this is dim=-1
         return idx
 
 model = BigramLanguageModel()
