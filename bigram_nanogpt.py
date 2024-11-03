@@ -8,7 +8,7 @@ torch.manual_seed(1337)
 
 wandb.init(project="bigram_nanogpt")
 wandb.run.tags = ['bigram', 'nanogpt']
-wandb.run.notes = 'multi headed attention implemented'
+wandb.run.notes = 'feed forward nns implemented'
 
 # pull from local folder
 filename = 'tinyshakespeare.txt'
@@ -89,6 +89,20 @@ class MultiHeadAttention(nn.Module):
     def forward(self, x):
         return torch.cat([head(x) for head in self.heads], dim=-1)
 
+class FeedForwardNN(nn.Module):
+    '''simple one layer linear nn'''
+
+    def __init__(self, n_emb):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_emb, n_emb),
+            nn.ReLU()
+        )
+    
+    def forward(self, x):
+        return self.net(x)
+
+
 class BigramLanguageModel(nn.Module):
     def __init__(self):
         super().__init__()
@@ -96,6 +110,7 @@ class BigramLanguageModel(nn.Module):
         self.token_embedding_table = nn.Embedding(vocab_size, n_emb) # W_E in GPT-2
         self.heads = MultiHeadAttention(4, n_emb//4) # W_Q, W_K, W_V in GPT-2
         self.positional_embedding_table = nn.Embedding(block_size, n_emb) # W_P in GPT-2
+        self.ffn = FeedForwardNN(n_emb)
         self.lm_head = nn.Linear(n_emb, vocab_size) # W_o in GPT-2
 
     def forward(self, idx, targets=None):
@@ -105,6 +120,7 @@ class BigramLanguageModel(nn.Module):
         pos_emb = self.positional_embedding_table(torch.arange(T)) # time x channel
         x = token_emb + pos_emb  # add positional embedding to token embedding
         x = self.heads(x) # apply self attention
+        x = self.ffn(x)
         logits = self.lm_head(x) # B, T, vocab size
 
         if targets is None:
