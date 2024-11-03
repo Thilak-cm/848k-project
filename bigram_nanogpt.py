@@ -1,15 +1,14 @@
-import urllib.request
-import os
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import wandb
+from tqdm import tqdm
 torch.manual_seed(1337)
 
 wandb.init(project="bigram_nanogpt")
 wandb.run.tags = ['bigram', 'nanogpt']
-wandb.run.notes = 'self attention implemented'
+wandb.run.notes = 'multi headed attention implemented'
 
 # pull from local folder
 filename = 'tinyshakespeare.txt'
@@ -80,12 +79,22 @@ class AttentionHead(nn.Module):
         # back to the dims we started with
         return out
 
+class MultiHeadAttention(nn.Module):
+    '''multi headed self attention'''
+
+    def __init__(self, num_heads, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([AttentionHead(head_size) for _ in range(num_heads)])
+    
+    def forward(self, x):
+        return torch.cat([head(x) for head in self.heads], dim=-1)
+
 class BigramLanguageModel(nn.Module):
     def __init__(self):
         super().__init__()
         # each token directly reads off the logits for the next token in the lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_emb) # W_E in GPT-2
-        self.attention_head = AttentionHead(n_emb) # W_Q, W_K, W_V in GPT-2
+        self.heads = MultiHeadAttention(4, n_emb//4) # W_Q, W_K, W_V in GPT-2
         self.positional_embedding_table = nn.Embedding(block_size, n_emb) # W_P in GPT-2
         self.lm_head = nn.Linear(n_emb, vocab_size) # W_o in GPT-2
 
@@ -95,7 +104,7 @@ class BigramLanguageModel(nn.Module):
         token_emb = self.token_embedding_table(idx) # Batch x time x channel (here channel is now n_emb)
         pos_emb = self.positional_embedding_table(torch.arange(T)) # time x channel
         x = token_emb + pos_emb  # add positional embedding to token embedding
-        x = self.attention_head(x) # apply self attention
+        x = self.heads(x) # apply self attention
         logits = self.lm_head(x) # B, T, vocab size
 
         if targets is None:
@@ -142,11 +151,10 @@ def estimate_loss():
     return out
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-batch_size = 32
 
 losses = []
 
-for iter in range(epochs):
+for iter in tqdm(range(epochs), desc="Training Epochs"):
     # evaluate loss every eval_iter number of epochs to ensure smooth loss curve
     if iter % eval_iter == 0:
         averaged_loss = estimate_loss()
@@ -168,10 +176,8 @@ for iter in range(epochs):
     optimizer.step()
     losses.append(loss.item())
 
+    wandb.log({'loss': loss.item()})
 
-print(100*'*')
-print(f"Training Complete")
-print(f"Best Validation Loss: {averaged_loss['val']}")
 print(100*'*')
 print(f"Generated Text:")
 idx = torch.zeros((1,1), dtype=torch.long)
@@ -183,11 +189,10 @@ plt.xlabel('Epochs')
 plt.ylabel('Loss')
 plt.title('Loss Curve')
 plt.legend()
-plt.show()
+# plt.show()
 
-# log loss, epoch, learning rate, block size, batch size, embedding size, optimizer, patience, device, vocab size to wandb
+# log epoch, learning rate, block size, batch size, embedding size, optimizer, patience, device, vocab size to wandb
 wandb.log({
-    "loss": loss.item(),
     "epoch": iter,
     "learning_rate": learning_rate,
     "block_size": block_size,
