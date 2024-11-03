@@ -4,11 +4,12 @@ import torch.nn as nn
 from torch.nn import functional as F
 import wandb
 from tqdm import tqdm
+import time
 torch.manual_seed(1337)
 
 wandb.init(project="bigram_nanogpt")
-wandb.run.tags = ['bigram', 'nanogpt']
-wandb.run.notes = 'feed forward nns implemented'
+wandb.run.tags = ['attention heads', 'multi headed attention', 'residual connections', 'feed forward nn']
+wandb.run.notes = 'nano gpt'
 
 # pull from local folder
 filename = 'tinyshakespeare.txt'
@@ -102,15 +103,32 @@ class FeedForwardNN(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+class Block(nn.Module):
+    '''transformer block: create multiple blocks and concatenate them'''
+
+    def __init__(self, n_emb, num_heads):
+        super().__init__()
+        head_size = n_emb // num_heads
+        self.sa = MultiHeadAttention(num_heads, head_size)
+        self.ffn = FeedForwardNN(n_emb)
+
+    def forward(self, x):
+        x = x + self.sa(x) # residual connection
+        x = x + self.ffn(x) # residual connection (damn that was a very easy change to make)
+        return x
+
 
 class BigramLanguageModel(nn.Module):
     def __init__(self):
         super().__init__()
         # each token directly reads off the logits for the next token in the lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_emb) # W_E in GPT-2
-        self.heads = MultiHeadAttention(4, n_emb//4) # W_Q, W_K, W_V in GPT-2
         self.positional_embedding_table = nn.Embedding(block_size, n_emb) # W_P in GPT-2
-        self.ffn = FeedForwardNN(n_emb)
+        self.blocks = nn.Sequential(
+            Block(n_emb, num_heads=4),
+            Block(n_emb, num_heads=4),
+            Block(n_emb, num_heads=4)
+        )
         self.lm_head = nn.Linear(n_emb, vocab_size) # W_o in GPT-2
 
     def forward(self, idx, targets=None):
@@ -119,8 +137,7 @@ class BigramLanguageModel(nn.Module):
         token_emb = self.token_embedding_table(idx) # Batch x time x channel (here channel is now n_emb)
         pos_emb = self.positional_embedding_table(torch.arange(T)) # time x channel
         x = token_emb + pos_emb  # add positional embedding to token embedding
-        x = self.heads(x) # apply self attention
-        x = self.ffn(x)
+        x = self.blocks(x)
         logits = self.lm_head(x) # B, T, vocab size
 
         if targets is None:
@@ -172,6 +189,8 @@ losses = []
 best_train_loss = float('inf')
 best_val_loss = float('inf')
 
+start_time = time.time()
+
 for iter in tqdm(range(epochs), desc="Training Epochs"):
     # evaluate loss every eval_iter number of epochs to ensure smooth loss curve
     if iter % eval_iter == 0:
@@ -201,6 +220,9 @@ for iter in tqdm(range(epochs), desc="Training Epochs"):
     if averaged_loss['val'] < best_val_loss:
         best_val_loss = averaged_loss['val']
 
+end_time = time.time()
+train_time = end_time - start_time
+
 print(100*'*')
 print(f"Best Train Loss: {best_train_loss}")
 print(f"Best Validation Loss: {best_val_loss}")
@@ -227,7 +249,9 @@ wandb.log({
     "device": device,
     "vocab_size": vocab_size,
     "best_train_loss": best_train_loss,
-    "best_val_loss": best_val_loss
+    "best_val_loss": best_val_loss,
+    'Training Time': train_time
 })
 
+print(f"Total time to train model up to {epochs} epochs: {train_time:.2f} seconds")
 wandb.finish()
