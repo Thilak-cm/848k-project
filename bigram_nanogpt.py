@@ -42,7 +42,6 @@ data = torch.tensor(encode(text), dtype=torch.long)
 train_size = int(0.85 * len(data))
 train_data = data[:train_size]
 test_data = data[train_size:]
-train_dataset = data[:block_size + 1]
 
 torch.manual_seed(1337)
 batch_size = 4 # how many sequences we will process in parallel, each of these sequences is block_size long
@@ -146,26 +145,12 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 batch_size = 32
 
 losses = []
-best_val_loss = float('inf')
-patience = 10
-patience_counter = 0
 
 for iter in range(epochs):
     # evaluate loss every eval_iter number of epochs to ensure smooth loss curve
     if iter % eval_iter == 0:
         averaged_loss = estimate_loss()
         print(f"Epoch: {iter}, train loss: {averaged_loss['train']}, val loss: {averaged_loss['val']}")
-        
-        # Check for early stopping
-        if averaged_loss['val'] < best_val_loss:
-            best_val_loss = averaged_loss['val']
-            patience_counter = 0
-        else:
-            patience_counter += 1
-        
-        if patience_counter >= patience:
-            print("Early stopping triggered")
-            break
     
     # fetch batches
     xb, yb = get_batch('train')
@@ -183,33 +168,34 @@ for iter in range(epochs):
     optimizer.step()
     losses.append(loss.item())
 
-    # log loss, epoch, learning rate, block size, batch size, embedding size, optimizer, patience, device, vocab size to wandb
-    wandb.log({
-        "loss": loss.item(),
-        "epoch": iter,
-        "learning_rate": learning_rate,
-        "block_size": block_size,
-        "batch_size": batch_size,
-        "embedding_size": n_emb,
-        "optimizer": "AdamW",
-        "patience": patience,
-        "device": device,
-        "vocab_size": vocab_size
-    })
 
 print(100*'*')
 print(f"Training Complete")
-print(f"Best Validation Loss: {best_val_loss}")
+print(f"Best Validation Loss: {averaged_loss['val']}")
 print(100*'*')
 print(f"Generated Text:")
 idx = torch.zeros((1,1), dtype=torch.long)
 print(decode(model.generate(idx, max_new_tokens=500)[0].tolist()))
 
 # plot loss curve
-plt.plot(losses)
+plt.plot(losses, label='train')
 plt.xlabel('Epochs')
 plt.ylabel('Loss')
 plt.title('Loss Curve')
+plt.legend()
 plt.show()
+
+# log loss, epoch, learning rate, block size, batch size, embedding size, optimizer, patience, device, vocab size to wandb
+wandb.log({
+    "loss": loss.item(),
+    "epoch": iter,
+    "learning_rate": learning_rate,
+    "block_size": block_size,
+    "batch_size": batch_size,
+    "embedding_size": n_emb,
+    "optimizer": "AdamW",
+    "device": device,
+    "vocab_size": vocab_size
+})
 
 wandb.finish()
