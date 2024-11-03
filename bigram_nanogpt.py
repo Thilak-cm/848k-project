@@ -7,6 +7,7 @@ from tqdm import tqdm
 import time
 torch.manual_seed(1337)
 
+# initialize wandb
 wandb.init(project="bigram_nanogpt")
 wandb.run.tags = ['attention heads', 'multi headed attention', 'residual connections', 'feed forward nn', 'added layer norm']
 wandb.run.notes = 'nano gpt'
@@ -19,17 +20,21 @@ with open(filename, 'r') as f:
 # get vocab
 vocab = list(sorted(set(text)))
 vocab_size = len(vocab)
+# embedding dimensions
 n_emb = 384
 learning_rate = 1e-4
 # create block sizes of 8
 block_size = 256
 epochs = 5000
+# how often to evaluate loss
 eval_iter = 200
+# number of blocks in the transformer
 n_layer = 6
+# number of heads in the transformer
 n_heads = 6
-# so each head will have 64 dimensions
+# so each head will have 64 dimensions (384/6)
 dropout = 0.2 # 20% will be zeroed out
-train_test_split = 0.85
+train_test_split = 0.85 # 85% of data will be used for training
 device = 'mps' if torch.backends.mps.is_available() else 'cpu'
 
 # character level encoding and decoding
@@ -43,7 +48,7 @@ decode = lambda x: ''.join([itos[i] for i in x])
 # encode full dataset
 data = torch.tensor(encode(text), dtype=torch.long)
 
-# train test split, 85% split
+# train test split
 train_size = int(train_test_split * len(data))
 train_data = data[:train_size]
 test_data = data[train_size:]
@@ -64,10 +69,12 @@ class AttentionHead(nn.Module):
 
     def __init__(self, head_size):
         super().__init__()
+        # usually bias is not used in self-attention TODO: understand better why
         self.key = nn.Linear(n_emb, head_size, bias=False)
         self.query = nn.Linear(n_emb, head_size, bias=False)
         self.value = nn.Linear(n_emb, head_size, bias=False)
-        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+        # triangular mask to prevent attending to future tokens
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size))) # TODO: understand register buffer's purpose here
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
@@ -75,23 +82,26 @@ class AttentionHead(nn.Module):
         k = self.key(x) # BxTxC
         q = self.query(x) # BxTxC
         # compute attention scores
+        # could potentially be optimized by using einsum? TODO: understand how
+        # could potentially use lora's code to optimize this
         wei = q @ k.transpose(-2, -1) * C ** -0.5 # BxTxC @ BxCxT (because of transposing second last and last dim of k) --> BxTxT
         # BxTxT: the TxT part of this attention matrix is where the quadratic complexity dependent on context length comes from
         # * C ** -0.5 is the one over root dk scaling factor in the attention formula
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # wherever tril is 0, in that position of wei, replace existing value with -inf
-        wei = torch.softmax(wei, dim=-1)
+        # :T, :T is sliced to prevent index out of bounds error (for the case where block_size is not equal to T)
+        wei = torch.softmax(wei, dim=-1) # TODO: understand why we softmax on the last dim
         wei = self.dropout(wei) # dropout on attention scores, randomly set some of them to 0
         v = self.value(x)
         # perform aggregation of values with attention scores
         out = wei @ v # BxTxT @ BxTxC --> BxTxC
         # back to the dims we started with
         return out
-
+    
 class MultiHeadAttention(nn.Module):
     '''multi headed self attention'''
 
     def __init__(self, num_heads, head_size):
-        super().__init__()
+        super().__init__() # TODO: understand why we need this
         self.heads = nn.ModuleList([AttentionHead(head_size) for _ in range(num_heads)])
         self.projection = nn.Linear(n_emb, n_emb) # linear layer to project concatenated heads output back to n_emb
         # project back into the residual pathway
@@ -109,7 +119,7 @@ class FeedForwardNN(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(n_emb, 4 * n_emb), # add a factor of 4 to n_emb as per GPT-2, just to make it more expressive, increasing complexity and computation
-            nn.ReLU(),
+            nn.ReLU(), # TODO: use GELU instead of ReLU
             nn.Linear(4 * n_emb, n_emb), # linear projection back into the residual pathway
             nn.Dropout(dropout) # add right before connetion before residual connection
         )
