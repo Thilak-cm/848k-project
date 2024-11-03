@@ -4,7 +4,12 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+import wandb
 torch.manual_seed(1337)
+
+wandb.init(project="bigram_nanogpt")
+wandb.tags(['bigram', 'nanogpt'])
+wandb.notes('self attention implemented')
 
 # pull from local folder
 filename = 'tinyshakespeare.txt'
@@ -178,6 +183,20 @@ for iter in range(epochs):
     optimizer.step()
     losses.append(loss.item())
 
+    # log loss, epoch, learning rate, block size, batch size, embedding size, optimizer, patience, device, vocab size to wandb
+    wandb.log({
+        "loss": loss.item(),
+        "epoch": iter,
+        "learning_rate": learning_rate,
+        "block_size": block_size,
+        "batch_size": batch_size,
+        "embedding_size": n_emb,
+        "optimizer": "AdamW",
+        "patience": patience,
+        "device": device,
+        "vocab_size": vocab_size
+    })
+
 print(100*'*')
 print(f"Generated Text:")
 idx = torch.zeros((1,1), dtype=torch.long)
@@ -189,3 +208,5 @@ plt.xlabel('Epochs')
 plt.ylabel('Loss')
 plt.title('Loss Curve')
 plt.show()
+
+wandb.finish()
