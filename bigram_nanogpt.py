@@ -8,7 +8,7 @@ import time
 torch.manual_seed(1337)
 
 wandb.init(project="bigram_nanogpt")
-wandb.run.tags = ['attention heads', 'multi headed attention', 'residual connections', 'feed forward nn']
+wandb.run.tags = ['attention heads', 'multi headed attention', 'residual connections', 'feed forward nn', 'added layer norm']
 wandb.run.notes = 'nano gpt'
 
 # pull from local folder
@@ -19,12 +19,17 @@ with open(filename, 'r') as f:
 # get vocab
 vocab = list(sorted(set(text)))
 vocab_size = len(vocab)
-n_emb = 32
-learning_rate = 1e-3
+n_emb = 384
+learning_rate = 1e-4
 # create block sizes of 8
-block_size = 8
+block_size = 256
 epochs = 5000
 eval_iter = 200
+n_layer = 6
+n_heads = 6
+# so each head will have 64 dimensions
+dropout = 0.2 # 20% will be zeroed out
+train_test_split = 0.85
 device = 'mps' if torch.backends.mps.is_available() else 'cpu'
 
 # character level encoding and decoding
@@ -39,7 +44,7 @@ decode = lambda x: ''.join([itos[i] for i in x])
 data = torch.tensor(encode(text), dtype=torch.long)
 
 # train test split, 85% split
-train_size = int(0.85 * len(data))
+train_size = int(train_test_split * len(data))
 train_data = data[:train_size]
 test_data = data[train_size:]
 
@@ -63,6 +68,7 @@ class AttentionHead(nn.Module):
         self.query = nn.Linear(n_emb, head_size, bias=False)
         self.value = nn.Linear(n_emb, head_size, bias=False)
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         B, T, C = x.shape
@@ -74,6 +80,7 @@ class AttentionHead(nn.Module):
         # * C ** -0.5 is the one over root dk scaling factor in the attention formula
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # wherever tril is 0, in that position of wei, replace existing value with -inf
         wei = torch.softmax(wei, dim=-1)
+        wei = self.dropout(wei) # dropout on attention scores, randomly set some of them to 0
         v = self.value(x)
         # perform aggregation of values with attention scores
         out = wei @ v # BxTxT @ BxTxC --> BxTxC
@@ -88,10 +95,12 @@ class MultiHeadAttention(nn.Module):
         self.heads = nn.ModuleList([AttentionHead(head_size) for _ in range(num_heads)])
         self.projection = nn.Linear(n_emb, n_emb) # linear layer to project concatenated heads output back to n_emb
         # project back into the residual pathway
+        self.dropout = nn.Dropout(dropout)
     
     def forward(self, x):
         out = torch.cat([h(x) for h in self.heads], dim=-1) # BxTxC
-        return self.projection(out) 
+        out = self.projection(out)
+        return self.dropout(out)
 
 class FeedForwardNN(nn.Module):
     '''simple one layer linear nn'''
@@ -99,8 +108,10 @@ class FeedForwardNN(nn.Module):
     def __init__(self, n_emb):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(n_emb, n_emb),
-            nn.ReLU()
+            nn.Linear(n_emb, 4 * n_emb), # add a factor of 4 to n_emb as per GPT-2, just to make it more expressive, increasing complexity and computation
+            nn.ReLU(),
+            nn.Linear(4 * n_emb, n_emb), # linear projection back into the residual pathway
+            nn.Dropout(dropout) # add right before connetion before residual connection
         )
     
     def forward(self, x):
@@ -114,10 +125,12 @@ class Block(nn.Module):
         head_size = n_emb // num_heads
         self.sa = MultiHeadAttention(num_heads, head_size)
         self.ffn = FeedForwardNN(n_emb)
+        self.ln1 = nn.LayerNorm(n_emb)
+        self.ln2 = nn.LayerNorm(n_emb)
 
     def forward(self, x):
-        x = x + self.sa(x) # residual connection
-        x = x + self.ffn(x) # residual connection (damn that was a very easy change to make)
+        x = x + self.sa(self.ln1(x)) # residual connection
+        x = x + self.ffn(self.ln2(x)) # residual connection (damn that was a very easy change to make)
         return x
 
 
@@ -127,11 +140,8 @@ class BigramLanguageModel(nn.Module):
         # each token directly reads off the logits for the next token in the lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_emb) # W_E in GPT-2
         self.positional_embedding_table = nn.Embedding(block_size, n_emb) # W_P in GPT-2
-        self.blocks = nn.Sequential(
-            Block(n_emb, num_heads=4),
-            Block(n_emb, num_heads=4),
-            Block(n_emb, num_heads=4)
-        )
+        self.blocks = nn.Sequential(*[Block(n_emb, num_heads=n_heads) for _ in range(n_layer)]) # 4 blocks as per GPT-2 # TODO; understand the syntax of the * here
+        # also this is just a simpler representation of the previous thing we did, where we had a list of blocks and we individually called them
         self.lm_head = nn.Linear(n_emb, vocab_size) # W_o in GPT-2
 
     def forward(self, idx, targets=None):
@@ -231,7 +241,16 @@ print(f"Best Train Loss: {best_train_loss}")
 print(f"Best Validation Loss: {best_val_loss}")
 print(f"Generated Text:")
 idx = torch.zeros((1,1), dtype=torch.long)
-print(decode(model.generate(idx, max_new_tokens=500)[0].tolist()))
+# save text to file
+with open('generated_shakespeare_text.txt', 'w') as f:
+    f.write(decode(model.generate(idx, max_new_tokens=2000)[0].tolist()))
+
+with open('generated_shakespeare_text.txt', 'r') as f:
+    print(f.read())
+print(100*'*')
+
+# have wandb save the text file
+wandb.save('generated_shakespeare_text.txt')
 
 # plot loss curve
 plt.plot(losses, label='train')
@@ -243,7 +262,7 @@ plt.legend()
 
 # log epoch, learning rate, block size, batch size, embedding size, optimizer, patience, device, vocab size to wandb
 wandb.log({
-    "epoch": iter,
+    'epochs': epochs,
     "learning_rate": learning_rate,
     "block_size": block_size,
     "batch_size": batch_size,
@@ -253,7 +272,11 @@ wandb.log({
     "vocab_size": vocab_size,
     "best_train_loss": best_train_loss,
     "best_val_loss": best_val_loss,
-    'Training Time': train_time
+    'Training Time': train_time, 
+    'dropout': dropout,
+    'n_layer': n_layer,
+    'n_heads': n_heads,
+    'train_test_split': train_test_split
 })
 
 print(f"Total time to train model up to {epochs} epochs: {train_time:.2f} seconds")
