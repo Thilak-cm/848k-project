@@ -15,6 +15,11 @@ with open(filename, 'r') as f:
 vocab = list(sorted(set(text)))
 vocab_size = len(vocab)
 n_emb = 32
+learning_rate = 1e-3
+# create block sizes of 8
+block_size = 8
+epochs = 5000
+eval_iter = 200
 device = 'mps' if torch.backends.mps.is_available() else 'cpu'
 
 # character level encoding and decoding
@@ -32,11 +37,6 @@ data = torch.tensor(encode(text), dtype=torch.long)
 train_size = int(0.85 * len(data))
 train_data = data[:train_size]
 test_data = data[train_size:]
-
-# create block sizes of 8
-block_size = 8
-epochs = 2000
-eval_iter = 200
 train_dataset = data[:block_size + 1]
 
 torch.manual_seed(1337)
@@ -50,11 +50,38 @@ def get_batch(split):
     y = torch.stack([data[i+1:i+block_size+1] for i in ix])
     return x, y
 
+class AttentionHead(nn.Module):
+    '''one head of self-attention'''
+
+    def __init__(self, head_size):
+        super().__init__()
+        self.key = nn.Linear(n_emb, head_size, bias=False)
+        self.query = nn.Linear(n_emb, head_size, bias=False)
+        self.value = nn.Linear(n_emb, head_size, bias=False)
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+
+    def forward(self, x):
+        B, T, C = x.shape
+        k = self.key(x) # BxTxC
+        q = self.query(x) # BxTxC
+        # compute attention scores
+        wei = q @ k.transpose(-2, -1) * C ** -0.5 # BxTxC @ BxCxT (because of transposing second last and last dim of k) --> BxTxT
+        # BxTxT: the TxT part of this attention matrix is where the quadratic complexity dependent on context length comes from
+        # * C ** -0.5 is the one over root dk scaling factor in the attention formula
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # wherever tril is 0, in that position of wei, replace existing value with -inf
+        wei = torch.softmax(wei, dim=-1)
+        v = self.value(x)
+        # perform aggregation of values with attention scores
+        out = wei @ v # BxTxT @ BxTxC --> BxTxC
+        # back to the dims we started with
+        return out
+
 class BigramLanguageModel(nn.Module):
     def __init__(self):
         super().__init__()
         # each token directly reads off the logits for the next token in the lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_emb) # W_E in GPT-2
+        self.attention_head = AttentionHead(n_emb) # W_Q, W_K, W_V in GPT-2
         self.positional_embedding_table = nn.Embedding(block_size, n_emb) # W_P in GPT-2
         self.lm_head = nn.Linear(n_emb, vocab_size) # W_o in GPT-2
 
@@ -64,6 +91,7 @@ class BigramLanguageModel(nn.Module):
         token_emb = self.token_embedding_table(idx) # Batch x time x channel (here channel is now n_emb)
         pos_emb = self.positional_embedding_table(torch.arange(T)) # time x channel
         x = token_emb + pos_emb  # add positional embedding to token embedding
+        x = self.attention_head(x) # apply self attention
         logits = self.lm_head(x) # B, T, vocab size
 
         if targets is None:
@@ -109,14 +137,30 @@ def estimate_loss():
     model.train()
     return out
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
+optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 batch_size = 32
 
+losses = []
+best_val_loss = float('inf')
+patience = 10
+patience_counter = 0
+
 for iter in range(epochs):
-    # evalute loss every eval_iter number of epochs to ensure smooth loss curve
+    # evaluate loss every eval_iter number of epochs to ensure smooth loss curve
     if iter % eval_iter == 0:
         averaged_loss = estimate_loss()
         print(f"Epoch: {iter}, train loss: {averaged_loss['train']}, val loss: {averaged_loss['val']}")
+        
+        # Check for early stopping
+        if averaged_loss['val'] < best_val_loss:
+            best_val_loss = averaged_loss['val']
+            patience_counter = 0
+        else:
+            patience_counter += 1
+        
+        if patience_counter >= patience:
+            print("Early stopping triggered")
+            break
     
     # fetch batches
     xb, yb = get_batch('train')
@@ -132,9 +176,16 @@ for iter in range(epochs):
 
     # gradient update
     optimizer.step()
+    losses.append(loss.item())
 
 print(100*'*')
 print(f"Generated Text:")
 idx = torch.zeros((1,1), dtype=torch.long)
 print(decode(model.generate(idx, max_new_tokens=500)[0].tolist()))
 
+# plot loss curve
+plt.plot(losses)
+plt.xlabel('Epochs')
+plt.ylabel('Loss')
+plt.title('Loss Curve')
+plt.show()
