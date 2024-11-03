@@ -169,6 +169,8 @@ def estimate_loss():
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
 losses = []
+best_train_loss = float('inf')
+best_val_loss = float('inf')
 
 for iter in tqdm(range(epochs), desc="Training Epochs"):
     # evaluate loss every eval_iter number of epochs to ensure smooth loss curve
@@ -194,7 +196,14 @@ for iter in tqdm(range(epochs), desc="Training Epochs"):
 
     wandb.log({'loss': loss.item()})
 
+    if averaged_loss['train'] < best_train_loss:
+        best_train_loss = averaged_loss['train']
+    if averaged_loss['val'] < best_val_loss:
+        best_val_loss = averaged_loss['val']
+
 print(100*'*')
+print(f"Best Train Loss: {best_train_loss}")
+print(f"Best Validation Loss: {best_val_loss}")
 print(f"Generated Text:")
 idx = torch.zeros((1,1), dtype=torch.long)
 print(decode(model.generate(idx, max_new_tokens=500)[0].tolist()))
@@ -216,7 +225,9 @@ wandb.log({
     "embedding_size": n_emb,
     "optimizer": "AdamW",
     "device": device,
-    "vocab_size": vocab_size
+    "vocab_size": vocab_size,
+    "best_train_loss": best_train_loss,
+    "best_val_loss": best_val_loss
 })
 
 wandb.finish()
