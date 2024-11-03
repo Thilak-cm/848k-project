@@ -8,8 +8,8 @@ import wandb
 torch.manual_seed(1337)
 
 wandb.init(project="bigram_nanogpt")
-wandb.tags(['bigram', 'nanogpt'])
-wandb.notes('self attention implemented')
+wandb.run.tags = ['bigram', 'nanogpt']
+wandb.run.notes = 'self attention implemented'
 
 # pull from local folder
 filename = 'tinyshakespeare.txt'
@@ -197,6 +197,9 @@ for iter in range(epochs):
         "vocab_size": vocab_size
     })
 
+print(100*'*')
+print(f"Training Complete")
+print(f"Best Validation Loss: {best_val_loss}")
 print(100*'*')
 print(f"Generated Text:")
 idx = torch.zeros((1,1), dtype=torch.long)
