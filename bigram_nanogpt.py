@@ -86,9 +86,12 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads, head_size):
         super().__init__()
         self.heads = nn.ModuleList([AttentionHead(head_size) for _ in range(num_heads)])
+        self.projection = nn.Linear(n_emb, n_emb) # linear layer to project concatenated heads output back to n_emb
+        # project back into the residual pathway
     
     def forward(self, x):
-        return torch.cat([head(x) for head in self.heads], dim=-1)
+        out = torch.cat([h(x) for h in self.heads], dim=-1) # BxTxC
+        return self.projection(out) 
 
 class FeedForwardNN(nn.Module):
     '''simple one layer linear nn'''
