@@ -91,10 +91,10 @@ class Block(nn.Module):
 #%%
 @dataclass
 class GPTConfig:
-    block_size: int = 1024
+    block_size: int = 1024 # Maximum sequence length
     vocab_size: int = 50257 # 50k "Byte Pair Encodings" (BPE) vocab size + 256 bytes tokens + 1 <|endoftoken|>
-    n_layer: int = 12 # Number of transformer blocks
-    n_head: int = 12 # Number of heads in the multi-head attention
+    n_layer: int = 12 # Number of transformer blocks (how deep is the model)
+    n_head: int = 12 # Number of heads in the multi-head attention (how wide is the model)
     n_embed: int = 768 # Embedding dimensionality
 
 class GPT(nn.Module):
