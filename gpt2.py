@@ -75,6 +75,7 @@ class CausalSelfAttention(nn.Module):
 
 # This is for transformer block
 class Block(nn.Module):
+    # write 
 
     def __init__(self, config):
         super(Block, self).__init__()
@@ -84,11 +85,12 @@ class Block(nn.Module):
         self.mlp = MLP(config)
     
     def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
+        x = x + self.attn(self.ln_1(x)) # clean residual connections are desrable for deep models form an optimization perspective
+        x = x + self.mlp(self.ln_2(x)) # also we perform layer normalization before self attention and MLP, in contrast to the original transformer
+        # this is because it is more stable to normalize the input to each sub-layer, rather than the output
+        # this is called pre-normalization and is used in the "An Image is Worth 16x16 Words" paper
         return x
 
-#%%
 @dataclass
 class GPTConfig:
     block_size: int = 1024 # Maximum sequence length
