@@ -22,18 +22,17 @@ with open(filename, 'r') as f:
 vocab = list(sorted(set(text)))
 vocab_size = len(vocab)
 # embedding dimensions 
-n_emb = 384
+n_emb = 32
 learning_rate = 1e-4
-# create block sizes of 8
-block_size = 256
+block_size = 8
 epochs = 5000
 # how often to evaluate loss
 eval_iter = 200
 # number of blocks in the transformer
-n_layer = 6
+n_layer = 4
 # number of heads in the transformer
-n_heads = 6
-# so each head will have 64 dimensions (384/6)
+n_heads = 4
+# so each head has 8 dimensions (32/4)
 dropout = 0.2 # 20% will be zeroed out
 train_test_split = 0.85 # 85% of data will be used for training
 device = 'mps' if torch.backends.mps.is_available() else 'cpu'
@@ -197,56 +196,56 @@ class BigramLanguageModel(nn.Module):
 
 model = BigramLanguageModel()
 
-@torch.no_grad()
-def estimate_loss():
-    out = {}
-    model.eval()
-    for split in ['train', 'val']:
-        losses = torch.zeros(eval_iter)
-        for k in range(eval_iter):
-            X, Y = get_batch(split)
-            logits, loss = model(X, Y)
-            losses[k] = loss.item()
-        out[split] = loss.mean()
-    model.train()
-    return out
+optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate) # TODO: try adding a lr schedule
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-
-losses = []
+# Track best losses and store losses for plotting
 best_train_loss = float('inf')
 best_val_loss = float('inf')
+train_losses = []
+val_losses = []
 
+# Training loop
 start_time = time.time()
-
 for iter in tqdm(range(epochs), desc="Training Epochs"):
-    # evaluate loss every eval_iter number of epochs to ensure smooth loss curve
-    if iter % eval_iter == 0:
-        averaged_loss = estimate_loss()
-        print(f"Epoch: {iter}, train loss: {averaged_loss['train']}, val loss: {averaged_loss['val']}")
-    
-    # fetch batches
+    # Training phase
+    model.train()  # Set model to training mode
     xb, yb = get_batch('train')
+    logits, train_loss = model(xb, yb)
 
-    # forward pass
-    logits, loss = model(xb, yb)
-
-    # set gradients to zero at start of every new epoch
+    # Zero gradients, backward pass, and optimizer step
     optimizer.zero_grad(set_to_none=True)
-
-    # backprop
-    loss.backward()
-
-    # gradient update
+    train_loss.backward()
     optimizer.step()
-    losses.append(loss.item())
+    train_losses.append(train_loss.item())
 
-    wandb.log({'loss': loss.item()})
+    # Evaluation phase every eval_iter
+    if iter % eval_iter == 0:
+        model.eval()  # Set model to evaluation mode
+        val_losses_list = []
 
-    if averaged_loss['train'] < best_train_loss:
-        best_train_loss = averaged_loss['train']
-    if averaged_loss['val'] < best_val_loss:
-        best_val_loss = averaged_loss['val']
+        for _ in range(eval_iter):
+            with torch.no_grad():  # Disable gradient calculation
+                X_val, Y_val = get_batch('val')
+                logits, val_loss = model(X_val, Y_val)
+                val_losses_list.append(val_loss.item())
+        
+        # Calculate mean of validation losses
+        avg_val_loss = sum(val_losses_list) / len(val_losses_list)
+
+        # Log and print average train and validation losses
+        print(f"Epoch: {iter}, Train Loss: {train_loss.item()}, Val Loss: {avg_val_loss}")
+        wandb.log({
+            'train_loss': train_loss.item(),
+            'val_loss': avg_val_loss,
+            'epoch': iter
+        })
+
+        # Track best losses
+        if train_loss.item() < best_train_loss:
+            best_train_loss = train_loss.item()
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+        val_losses.append(avg_val_loss)
 
 end_time = time.time()
 train_time = end_time - start_time
@@ -268,7 +267,8 @@ print(100*'*')
 wandb.save('generated_shakespeare_text.txt')
 
 # plot loss curve
-plt.plot(losses, label='train')
+plt.plot(train_losses, label='Train Loss')
+plt.plot(val_losses, label='Validation Loss')
 plt.xlabel('Epochs')
 plt.ylabel('Loss')
 plt.title('Loss Curve')
