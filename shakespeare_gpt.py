@@ -9,7 +9,7 @@ torch.manual_seed(1337)
 
 # initialize wandb
 wandb.init(project="bigram_nanogpt")
-wandb.run.tags = ['attention heads', 'multi headed attention', 'residual connections', 'feed forward nn', 'added layer norm']
+wandb.run.tags = ['attention heads', 'multi headed attention', 'residual connections', 'feed forward nn', 'added layer norm', 'shakepeare gpt']
 wandb.run.notes = 'nano gpt'
 
 # pull from local folder
