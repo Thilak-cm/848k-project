@@ -17,10 +17,11 @@ filename = 'tinyshakespeare.txt'
 with open(filename, 'r') as f:
     text = f.read()
 
+# TODO: count how many params you're using in this code, and implement chinchilla law to understand how much data you need to ensure you aren't under training
 # get vocab
 vocab = list(sorted(set(text)))
 vocab_size = len(vocab)
-# embedding dimensions
+# embedding dimensions 
 n_emb = 384
 learning_rate = 1e-4
 # create block sizes of 8
@@ -74,7 +75,8 @@ class AttentionHead(nn.Module):
         self.query = nn.Linear(n_emb, head_size, bias=False)
         self.value = nn.Linear(n_emb, head_size, bias=False)
         # triangular mask to prevent attending to future tokens
-        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size))) # TODO: understand register buffer's purpose here
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+        # using register buffer ensures that tril is not initialized as a param, so it won't be optimized during training
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
@@ -101,7 +103,8 @@ class MultiHeadAttention(nn.Module):
     '''multi headed self attention'''
 
     def __init__(self, num_heads, head_size):
-        super().__init__() # TODO: understand why we need this
+        super().__init__() # This initializes nn.Module (parent class from which MultiHeadAttention inherits from) before 
+        # initializing anything in this child class
         self.heads = nn.ModuleList([AttentionHead(head_size) for _ in range(num_heads)])
         self.projection = nn.Linear(n_emb, n_emb) # linear layer to project concatenated heads output back to n_emb
         # project back into the residual pathway
@@ -139,7 +142,8 @@ class Block(nn.Module):
         self.ln2 = nn.LayerNorm(n_emb)
 
     def forward(self, x):
-        x = x + self.sa(self.ln1(x)) # residual connection
+        x = x + self.sa(self.ln1(x)) # residual connection # TODO: test using layer norm after sa and ffn as in original transformer paper 
+        # and understand why there was an improvement in the new method
         x = x + self.ffn(self.ln2(x)) # residual connection (damn that was a very easy change to make)
         return x
 
@@ -150,7 +154,8 @@ class BigramLanguageModel(nn.Module):
         # each token directly reads off the logits for the next token in the lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_emb) # W_E in GPT-2
         self.positional_embedding_table = nn.Embedding(block_size, n_emb) # W_P in GPT-2
-        self.blocks = nn.Sequential(*[Block(n_emb, num_heads=n_heads) for _ in range(n_layer)]) # 4 blocks as per GPT-2 # TODO; understand the syntax of the * here
+        self.blocks = nn.Sequential(*[Block(n_emb, num_heads=n_heads) for _ in range(n_layer)]) # 4 blocks as per GPT-2 
+        # asterisk is used here to unpack the list of blocks so it can be passed as individual elements to nn.Sequential and not as one big list
         # also this is just a simpler representation of the previous thing we did, where we had a list of blocks and we individually called them
         self.lm_head = nn.Linear(n_emb, vocab_size) # W_o in GPT-2
 
