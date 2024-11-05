@@ -96,7 +96,7 @@ class AttentionHead(nn.Module):
         out = wei @ v # BxTxT @ BxTxC --> BxTxC
         # back to the dims we started with
         return out
-    
+
 class MultiHeadAttention(nn.Module):
     '''multi headed self attention'''
 
