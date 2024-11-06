@@ -13,11 +13,11 @@ import inspect
 class MLP(nn.Module):
     
     def __init__(self, config):
-        super(MLP, self).__init__()
+        super().__init__()
         self.c_fc = nn.Linear(config.n_embed, 4 * config.n_embed)
-        #IMP: Instead of using tanh, we can use non approximate version also
+        # TODO: Instead of using tanh, we can use non approximate version also
         #There is not much difference between the time for tanh and real GELU
-        self.gelu = nn.GELU(approximate='tanh') 
+        self.gelu = nn.GELU(approximate='tanh') # gpt2 uses tanh approximation so we're using it
         self.c_proj = nn.Linear(4 * config.n_embed, config.n_embed) 
     
     def forward(self, x):
@@ -30,11 +30,11 @@ class MLP(nn.Module):
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
 
-        super(CausalSelfAttention, self).__init__() 
+        super().__init__() 
         assert config.n_embed % config.n_head == 0
         
         # This is for query, key and value projections
-        self.c_attn = nn.Linear(config.n_embed, 3 * config.n_embed) 
+        self.c_attn = nn.Linear(config.n_embed, 3 * config.n_embed)  # combined linear projection for all three Q, K, V
         # This is for output projection
         self.c_proj = nn.Linear(config.n_embed, config.n_embed)
 
@@ -50,16 +50,18 @@ class CausalSelfAttention(nn.Module):
 
     def forward(self, x):
         B, T, C = x.size() # Batch size, Sequence Length, Embedding dimensionality (n_embed)
-
         # d_k = d_v = n_embed // n_head
         # n_head -> Number of heads in the multi-head attention
-        #Query, Key and Value projections
-        q, k, v = self.c_attn(x).split(self.n_embed, dim=2)
-        k = k.view(B, T, self.n_head, self.n_embed // self.n_head).transpose(1, 2)  # (Batch_size, nh, Sequence_length, hs)
-        q = q.view(B, T, self.n_head, self.n_embed // self.n_head).transpose(1, 2)  # (Batch_size, nh, Sequence_length, hs)
-        v = v.view(B, T, self.n_head, self.n_embed // self.n_head).transpose(1, 2)  # (Batch_size, nh, Sequence_length, hs)
+        # create query, key, value matrices
+        q, k, v = self.c_attn(x).split(self.n_embed, dim=2)  # B x T x n_embed -> B x T x 3*n_embed -> q, k, v each of shape B x T x n_embed
+        # hs (head size) = n_embed // n_head
+        # C == n_emb == n_head * hs == n_head * d_k == n_head * d_v
+        q = q.view(B, T, self.n_head, self.n_embed // self.n_head).transpose(1, 2)  # q (BxTxC) reshaped to B x T x n_head x hs then transposed to B x n_head x T x hs
+        k = k.view(B, T, self.n_head, self.n_embed // self.n_head).transpose(1, 2)  # same for k
+        v = v.view(B, T, self.n_head, self.n_embed // self.n_head).transpose(1, 2)  # same for v
 
-        #Attention mechanism
+
+        # Attention mechanism
         # att = (q @ k.transpose(-2, -1)) * (1.0 / ((k.size(-1)) ** 0.5))
         # # Masked Attention
         # att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
@@ -67,7 +69,7 @@ class CausalSelfAttention(nn.Module):
         # y = att @ v
 
         # Flash Attention
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # wow who knew flash attention was so easy to implement
         y = y.transpose(1, 2).contiguous().view(B, T, self.n_head * (self.n_embed // self.n_head))
         # Output projection
         y = self.c_proj(y)
@@ -75,31 +77,35 @@ class CausalSelfAttention(nn.Module):
 
 # This is for transformer block
 class Block(nn.Module):
+    # write 
 
     def __init__(self, config):
-        super(Block, self).__init__()
+        super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embed)
         self.attn = CausalSelfAttention(config)
         self.ln_2 = nn.LayerNorm(config.n_embed)
         self.mlp = MLP(config)
     
     def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
+        # didn't realize it was this easy to implement residual connections
+        x = x + self.attn(self.ln_1(x)) # clean residual connections are desrable for deep models form an optimization perspective
+        x = x + self.mlp(self.ln_2(x)) # also we perform layer normalization before self attention and MLP, in contrast to the original transformer
+        # this is because it is more stable to normalize the input to each sub-layer, rather than the output
+        # this is called pre-normalization and is used in the "An Image is Worth 16x16 Words" paper
         return x
 
-#%%
 @dataclass
 class GPTConfig:
-    block_size: int = 1024
+    block_size: int = 1024 # Maximum sequence length
     vocab_size: int = 50257 # 50k "Byte Pair Encodings" (BPE) vocab size + 256 bytes tokens + 1 <|endoftoken|>
-    n_layer: int = 12 # Number of transformer blocks
-    n_head: int = 12 # Number of heads in the multi-head attention
+    # special end of sequence token delimits document boundaries and can start generation as well
+    n_layer: int = 12 # Number of transformer blocks (how deep is the model)
+    n_head: int = 12 # Number of heads in the multi-head attention (how wide is the model)
     n_embed: int = 768 # Embedding dimensionality
 
 class GPT(nn.Module):
     def __init__(self, config):
-        super(GPT, self).__init__()
+        super().__init__()
         self.config = config
 
 
@@ -142,13 +148,13 @@ class GPT(nn.Module):
 
     def forward(self, idx, targets=None):
         B, T = idx.size()
-        assert T <= self.config.block_size, "Cannot forward, model block size is exhausted"
+        assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, model block size is {self.config.block_size}"
 
         # IMP: Token and Positional Embeddings
         pos = torch.arange(0, T, device=idx.device, dtype=torch.long)
         pos_emb = self.transformer.wpe(pos)  #Positional Embeddings of shape (T, n_embed)
         tok_emb = self.transformer.wte(idx)  #Token Embeddings of shape (B, T, n_embed)
-        x = tok_emb + pos_emb
+        x = tok_emb + pos_emb # broadcast along the batch dimension
 
         # Forward pass through each transformer block
         for block in self.transformer.h:
@@ -297,7 +303,7 @@ def compare(model, device):
 #         device = "mps"
 #     print(f"using device: {device}" )
 
-device = 'cpu' # For nibbas
+device = 'cpu' # For noobs
 if torch.cuda.is_available(): # For adults
     device = 'cuda'
 elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available(): # For kids
@@ -462,4 +468,3 @@ for i in range(max_steps):
     print(f"Epoch: {i}, Loss: {loss_accum}, lr: {lr}, norm: {norm}, Time Difference: {(t1 - t0)* 1000}ms, #tokens/sec: {tokens_per_sec}")
 # %%
 print(f"Average time: {avg_time / max_steps * 1000}ms, Average tokens/sec: {avg_tokens_per_sec / max_steps}")
-
