@@ -1,0 +1,43 @@
+using device: cuda
+C:\UMD\Sem 3\.venv\Lib\site-packages\torch\nn\modules\module.py:1160: UserWarning: expandable_segments not supported on this platform (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\builder\windows\pytorch\c10/cuda/CUDAAllocatorConfig.h:28.)
+  return t.to(
+# Decayed parameter tensors: 50 with 124354560 parameters
+# No Decay parameter tensors: 98 with 121344 parameters
+Using Fused AdamW: True
+Desired batch size: 524288, Gradient Accumulation Steps: 128
+Token indices sequence length is longer than the specified maximum sequence length for this model (338025 > 1024). Running this sequence through the model will result in indexing errors
+Loaded 338025 tokens
+1 epoch = 82 iterations
+C:\UMD\Sem 3\CMSC848K Multimodal Foundation Models\Project\848k-project\dataset\ShakesphereDataset.py:25: UserWarning: To copy construct from a tensor, it is recommended to use sourceTensor.clone().detach() or sourceTensor.clone().detach().requires_grad_(True), rather than torch.tensor(sourceTensor).
+  buf = torch.tensor(self.tokens[0][self.current_position:self.current_position + B*T + 1])
+C:\UMD\Sem 3\CMSC848K Multimodal Foundation Models\Project\848k-project\models\GPT2FlashAttention.py:72: UserWarning: 1Torch was not compiled with flash attention. (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\builder\windows\pytorch\aten\src\ATen\native\transformers\cuda\sdp_utils.cpp:555.)
+  y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # wow who knew flash attention was so easy to implement
+Epoch: 0, Loss: 10.957046508789062, lr: 5.9999999999999995e-05, norm: 7.655293941497803, Time Difference: 19730.740547180176ms, #tokens/sec: 26572.139993748424
+C:\UMD\Sem 3\CMSC848K Multimodal Foundation Models\Project\848k-project\dataset\ShakesphereDataset.py:25: UserWarning: To copy construct from a tensor, it is recommended to use sourceTensor.clone().detach() or sourceTensor.clone().detach().requires_grad_(True), rather than torch.tensor(sourceTensor).
+  buf = torch.tensor(self.tokens[0][self.current_position:self.current_position + B*T + 1])
+Epoch: 1, Loss: 9.677330017089844, lr: 0.00011999999999999999, norm: 5.0212297439575195, Time Difference: 19232.051134109497ms, #tokens/sec: 27261.158799132743
+Epoch: 2, Loss: 9.063663482666016, lr: 0.00017999999999999998, norm: 6.040813446044922, Time Difference: 19220.91293334961ms, #tokens/sec: 27276.956189230958
+Epoch: 3, Loss: 9.141571044921875, lr: 0.00023999999999999998, norm: 5.220770835876465, Time Difference: 23596.62175178528ms, #tokens/sec: 22218.77375138809
+Epoch: 4, Loss: 8.61065673828125, lr: 0.0003, norm: 4.000688552856445, Time Difference: 22179.675102233887ms, #tokens/sec: 23638.2182148013
+Epoch: 5, Loss: 8.194326400756836, lr: 0.00035999999999999997, norm: 2.369647264480591, Time Difference: 23129.88519668579ms, #tokens/sec: 22667.125043712866
+Epoch: 6, Loss: 7.768222808837891, lr: 0.00041999999999999996, norm: 2.710890769958496, Time Difference: 22272.753715515137ms, #tokens/sec: 23539.433277834094
+Epoch: 7, Loss: 8.129521369934082, lr: 0.00047999999999999996, norm: 60.44520568847656, Time Difference: 19488.447904586792ms, #tokens/sec: 26902.50155204016
+Epoch: 8, Loss: 7.140022277832031, lr: 0.0005399999999999999, norm: 4.662217140197754, Time Difference: 19351.29404067993ms, #tokens/sec: 27093.175210807683
+Epoch: 9, Loss: 7.3051347732543945, lr: 0.0006, norm: 20.264925003051758, Time Difference: 19364.899396896362ms, #tokens/sec: 27074.14013645887
+Epoch: 10, Loss: 6.883607864379883, lr: 0.0005999999999999998, norm: 6.96134614944458, Time Difference: 19438.09461593628ms, #tokens/sec: 26972.19096619499
+Epoch: 11, Loss: 6.222041130065918, lr: 0.0005991676801079444, norm: 2.4554483890533447, Time Difference: 19382.811546325684ms, #tokens/sec: 27049.12023454033
+Epoch: 12, Loss: 5.902660369873047, lr: 0.0005966758519606872, norm: 2.235553503036499, Time Difference: 19333.462953567505ms, #tokens/sec: 27118.16301400137
+Epoch: 13, Loss: 5.583860874176025, lr: 0.0005925398785073725, norm: 2.029066562652588, Time Difference: 19573.28486442566ms, #tokens/sec: 26785.89739185223
+Epoch: 14, Loss: 5.483177185058594, lr: 0.0005867852593996914, norm: 5.321244239807129, Time Difference: 22927.992582321167ms, #tokens/sec: 22866.720586967433
+Epoch: 15, Loss: 5.297394752502441, lr: 0.0005794474737780473, norm: 4.3403401374816895, Time Difference: 22059.220790863037ms, #tokens/sec: 23767.2946370418
+Epoch: 16, Loss: 5.2693986892700195, lr: 0.0005705717615308592, norm: 11.503387451171875, Time Difference: 24308.581829071045ms, #tokens/sec: 21568.020861381352
+Epoch: 17, Loss: 5.163331985473633, lr: 0.0005602128443756048, norm: 3.245683193206787, Time Difference: 22596.285820007324ms, #tokens/sec: 23202.397251312075
+Epoch: 18, Loss: 4.962085247039795, lr: 0.0005484345884812357, norm: 1.8114330768585205, Time Difference: 22645.796537399292ms, #tokens/sec: 23151.669632558252
+Epoch: 19, Loss: 4.902966022491455, lr: 0.0005353096107120083, norm: 2.792210340499878, Time Difference: 20599.419355392456ms, #tokens/sec: 25451.5911810278
+Epoch: 20, Loss: 4.8458662033081055, lr: 0.0005209188309203677, norm: 2.8659491539001465, Time Difference: 21228.472471237183ms, #tokens/sec: 24697.39641937811
+Epoch: 21, Loss: 4.774187088012695, lr: 0.0005053509730491494, norm: 4.6971025466918945, Time Difference: 21757.423639297485ms, #tokens/sec: 24096.97070259043
+Traceback (most recent call last):
+  File "C:\UMD\Sem 3\CMSC848K Multimodal Foundation Models\Project\848k-project\gpt2_flash_sinusoidal.py", line 79, in <module>
+    x, y = x.to(device), y.to(device)
+           ^^^^^^^^^^^^
+KeyboardInterrupt
