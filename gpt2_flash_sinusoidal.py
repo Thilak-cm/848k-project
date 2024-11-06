@@ -92,7 +92,7 @@ for i in range(max_steps):
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
     optimizer.step()
-    
+
     # This completes all the operations without starting new operation
     torch.cuda.synchronize()
     t1 = time.time()
