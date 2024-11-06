@@ -11,7 +11,6 @@ torch.manual_seed(1337)
 # initialize wandb
 wandb.init(project="GPT 2 848K")
 wandb.run.tags = ['GPT 1', 'test run']
-wandb.run.notes = 'nano gpt'
 
 # pull from local folder
 filename = 'tinyshakespeare.txt'
