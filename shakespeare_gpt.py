@@ -10,7 +10,7 @@ torch.manual_seed(1337)
 
 # initialize wandb
 wandb.init(project="GPT 2 848K")
-wandb.run.tags = ['GPT 1', 'test']
+wandb.run.tags = ['GPT 1', 'test run']
 wandb.run.notes = 'nano gpt'
 
 # pull from local folder
@@ -264,6 +264,8 @@ except FileNotFoundError:
         'best_train_loss': best_train_loss,
         'best_val_loss': best_val_loss
     }
+    with open(best_losses_file, 'w') as f:
+        json.dump(best_losses, f)
 
 print(f"Generated Text:")
 idx = torch.zeros((1,1), dtype=torch.long)
