@@ -9,8 +9,8 @@ import json
 torch.manual_seed(1337)
 
 # initialize wandb
-wandb.init(project="bigram_nanogpt")
-wandb.run.tags = ['attention heads', 'multi headed attention', 'residual connections', 'feed forward nn', 'added layer norm', 'shakepeare gpt', 'flash attention']
+wandb.init(project="GPT 2 848K")
+wandb.run.tags = ['GPT 1', 'test']
 wandb.run.notes = 'nano gpt'
 
 # pull from local folder
@@ -23,17 +23,17 @@ with open(filename, 'r') as f:
 vocab = list(sorted(set(text)))
 vocab_size = len(vocab)
 # embedding dimensions 
-n_emb = 384
+n_emb = 32
 learning_rate = 1e-4
-block_size = 256
+block_size = 8
 epochs = 5000
 # how often to evaluate loss
 eval_iter = 200
 # number of blocks in the transformer
-n_layer = 8
+n_layer = 2
 # number of heads in the transformer
-n_heads = 8
-# each head will have n_emb // n_heads dimensions = 384 // 8 = 48
+n_heads = 2
+# each head size is n_emb // n_heads = 32 // 2 = 16
 dropout = 0.2 # 20% will be zeroed out
 train_test_split = 0.9 # 85% of data will be used for training
 device = 'mps' if torch.backends.mps.is_available() else 'cpu'
@@ -238,8 +238,7 @@ for iter in tqdm(range(epochs), desc="Training Epochs"):
         print(f"Epoch: {iter}, Train Loss: {train_loss.item()}, Val Loss: {avg_val_loss}")
         wandb.log({
             'train_loss': train_loss.item(),
-            'val_loss': avg_val_loss,
-            'epoch': iter
+            'val_loss': avg_val_loss
         })
 
         # Track best losses
