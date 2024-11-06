@@ -5,11 +5,12 @@ from torch.nn import functional as F
 import wandb
 from tqdm import tqdm
 import time
+import json
 torch.manual_seed(1337)
 
 # initialize wandb
 wandb.init(project="bigram_nanogpt")
-wandb.run.tags = ['attention heads', 'multi headed attention', 'residual connections', 'feed forward nn', 'added layer norm', 'shakepeare gpt']
+wandb.run.tags = ['attention heads', 'multi headed attention', 'residual connections', 'feed forward nn', 'added layer norm', 'shakepeare gpt', 'flash attention']
 wandb.run.notes = 'nano gpt'
 
 # pull from local folder
@@ -22,19 +23,19 @@ with open(filename, 'r') as f:
 vocab = list(sorted(set(text)))
 vocab_size = len(vocab)
 # embedding dimensions 
-n_emb = 32
+n_emb = 384
 learning_rate = 1e-4
-block_size = 8
+block_size = 256
 epochs = 5000
 # how often to evaluate loss
 eval_iter = 200
 # number of blocks in the transformer
-n_layer = 4
+n_layer = 8
 # number of heads in the transformer
-n_heads = 4
-# so each head has 8 dimensions (32/4)
+n_heads = 8
+# each head will have n_emb // n_heads dimensions = 384 // 8 = 48
 dropout = 0.2 # 20% will be zeroed out
-train_test_split = 0.85 # 85% of data will be used for training
+train_test_split = 0.9 # 85% of data will be used for training
 device = 'mps' if torch.backends.mps.is_available() else 'cpu'
 
 # character level encoding and decoding
@@ -82,6 +83,7 @@ class AttentionHead(nn.Module):
         B, T, C = x.shape
         k = self.key(x) # BxTxC
         q = self.query(x) # BxTxC
+        v = self.value(x) # BxTxC
         # compute attention scores
         # could potentially be optimized by using einsum? TODO: understand how
         # could potentially use lora's code to optimize this
@@ -92,9 +94,9 @@ class AttentionHead(nn.Module):
         # :T, :T is sliced to prevent index out of bounds error (for the case where block_size is not equal to T)
         wei = torch.softmax(wei, dim=-1) # TODO: understand why we softmax on the last dim
         wei = self.dropout(wei) # dropout on attention scores, randomly set some of them to 0
-        v = self.value(x)
         # perform aggregation of values with attention scores
         out = wei @ v # BxTxT @ BxTxC --> BxTxC
+        # out = F.scaled_dot_product_attention(q, k, v, is_causal=True) # BxTxC
         # back to the dims we started with
         return out
 
@@ -251,31 +253,62 @@ end_time = time.time()
 train_time = end_time - start_time
 
 print(100*'*')
-print(f"Best Train Loss: {best_train_loss}")
-print(f"Best Validation Loss: {best_val_loss}")
+# Load best losses from JSON file if it exists
+best_losses_file = 'best_losses.json'
+try:
+    with open(best_losses_file, 'r') as f:
+        best_losses = json.load(f)
+        best_train_loss = best_losses.get('best_train_loss', best_train_loss)
+        best_val_loss = best_losses.get('best_val_loss', best_val_loss)
+except FileNotFoundError:
+    best_losses = {
+        'best_train_loss': best_train_loss,
+        'best_val_loss': best_val_loss
+    }
+
 print(f"Generated Text:")
 idx = torch.zeros((1,1), dtype=torch.long)
-# save text to file
-with open('generated_shakespeare_text.txt', 'w') as f:
-    f.write(decode(model.generate(idx, max_new_tokens=2000)[0].tolist()))
+generated_text = decode(model.generate(idx, max_new_tokens=2000)[0].tolist())
+print(generated_text)
 
-with open('generated_shakespeare_text.txt', 'r') as f:
-    print(f.read())
+# Check if current run has better losses
+if best_train_loss < best_losses.get('best_train_loss', float('inf')) or best_val_loss < best_losses.get('best_val_loss', float('inf')):
+    # Save generated text to file
+    with open('generated_shakespeare_text.txt', 'w') as f:
+        f.write(generated_text)
+
+    # Update best losses and save to JSON file
+    best_losses['best_train_loss'] = best_train_loss
+    best_losses['best_val_loss'] = best_val_loss
+    with open(best_losses_file, 'w') as f:
+        json.dump(best_losses, f)
+
+    # Have wandb save the text file
+    wandb.save('generated_shakespeare_text.txt')
+    # also save an image of the training and validation loss curves
+    plt.plot(train_losses, label='train loss')
+    plt.plot(val_losses, label='val loss')
+    plt.legend()
+    plt.savefig('train_val_loss.png')
+    wandb.save('train_val_loss.png')
+    print("Current run beat the best losses. Generated text saved.")
+
+else:
+    print("Current run did not beat the best losses. Generated text not saved.")
+print(100*'*')
 print(100*'*')
 
-# have wandb save the text file
-wandb.save('generated_shakespeare_text.txt')
+print(f"Best Train Loss: {best_train_loss}")
+print(f"Best Validation Loss: {best_val_loss}")
+# show total number of parameters in the model
+total_params = sum(p.numel() for p in model.parameters())
+print(f"Total number of parameters in the model: {total_params}")
+# show toal number of tokens in the dataset
+total_tokens = len(data)
+print(f"Total number of tokens in the dataset: {total_tokens}")
+print(f"According to Chinchilla Law, you need at least {total_params * 2} tokens to train this model.") # TODO: work on this
 
-# plot loss curve
-plt.plot(train_losses, label='Train Loss')
-plt.plot(val_losses, label='Validation Loss')
-plt.xlabel('Epochs')
-plt.ylabel('Loss')
-plt.title('Loss Curve')
-plt.legend()
-# plt.show()
-
-# log epoch, learning rate, block size, batch size, embedding size, optimizer, patience, device, vocab size to wandb
+# Ensure train_time and other parameters are defined before logging
 wandb.log({
     'epochs': epochs,
     "learning_rate": learning_rate,
@@ -291,7 +324,8 @@ wandb.log({
     'dropout': dropout,
     'n_layer': n_layer,
     'n_heads': n_heads,
-    'train_test_split': train_test_split
+    'train_test_split': train_test_split,
+    'total_params': total_params
 })
 
 print(f"Total time to train model up to {epochs} epochs: {train_time:.2f} seconds")
