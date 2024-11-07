@@ -23,6 +23,8 @@ vocab = list(sorted(set(text)))
 vocab_size = len(vocab)
 # embedding dimensions 
 n_emb = 32
+batch_size = 4 # how many sequences we will process in parallel, each of these sequences is block_size long
+block_size = 8 # the length of each sequence
 learning_rate = 1e-4
 block_size = 8
 epochs = 5000
@@ -52,10 +54,6 @@ data = torch.tensor(encode(text), dtype=torch.long)
 train_size = int(train_test_split * len(data))
 train_data = data[:train_size]
 test_data = data[train_size:]
-
-torch.manual_seed(1337)
-batch_size = 4 # how many sequences we will process in parallel, each of these sequences is block_size long
-block_size = 8 # the length of each sequence
 
 def get_batch(split):
     data = train_data if split == 'train' else test_data
@@ -148,7 +146,7 @@ class Block(nn.Module):
         return x
 
 
-class BigramLanguageModel(nn.Module):
+class NanoGPT(nn.Module):
     def __init__(self):
         super().__init__()
         # each token directly reads off the logits for the next token in the lookup table
@@ -195,7 +193,7 @@ class BigramLanguageModel(nn.Module):
             idx = torch.cat([idx, next_token], dim=-1) # Bx(T+1) # TODO: understand why this is dim=-1
         return idx
 
-model = BigramLanguageModel()
+model = NanoGPT()
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate) # TODO: try adding a lr schedule
 
