@@ -21,23 +21,30 @@ with open(filename, 'r') as f:
 # get vocab
 vocab = list(sorted(set(text)))
 vocab_size = len(vocab)
-# embedding dimensions 
-n_emb = 32
-batch_size = 4 # how many sequences we will process in parallel, each of these sequences is block_size long
-block_size = 8 # the length of each sequence
-learning_rate = 1e-4
-block_size = 8
-epochs = 5000
-# how often to evaluate loss
-eval_iter = 200
-# number of blocks in the transformer
-n_layer = 2
-# number of heads in the transformer
-n_heads = 2
-# each head size is n_emb // n_heads = 32 // 2 = 16
-dropout = 0.2 # 20% will be zeroed out
-train_test_split = 0.9 # 85% of data will be used for training
-device = 'mps' if torch.backends.mps.is_available() else 'cpu'
+
+scaled_up = False
+if scaled_up:
+    with open('gpt1_scaled_up_params.json', 'r') as f:
+        params = json.load(f)
+else:
+    with open('gpt1_small_params.json', 'r') as f:
+        params = json.load(f)
+
+# model parameters
+n_layer = params['n_layer']
+n_heads = params['n_heads']
+n_emb = params['n_emb']
+block_size = params['block_size']
+batch_size = params['batch_size']
+learning_rate = params['learning_rate']
+epochs = params['epochs']
+eval_iter = params['eval_iter']
+dropout = params['dropout']
+train_test_split = params['train_test_split']
+
+# Check if MPS (Metal Performance Shaders) is available for use on Mac
+device = torch.device("mps" if torch.backends.mps.is_built() else "cpu")
+print(f"Using device: {device}")
 
 # character level encoding and decoding
 stoi = {c: i for i, c in enumerate(vocab)}
@@ -194,8 +201,29 @@ class NanoGPT(nn.Module):
         return idx
 
 model = NanoGPT()
-
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate) # TODO: try adding a lr schedule
+
+# Calculate and display the total number of parameters in the model
+total_params = sum(p.numel() for p in model.parameters())
+print(f"Total number of parameters in the model: {total_params:,}")
+
+# Calculate and display the total number of tokens in the dataset
+total_tokens = len(data)
+print(f"Total number of tokens in the dataset: {total_tokens:,}")
+
+# Chinchilla Scaling Law suggests that the optimal number of tokens should be about 2 times the number of parameters.
+# According to Chinchilla Law, we need at least 2 * total_params tokens
+required_tokens = total_params * 2
+print(f"According to Chinchilla Scaling Law, you need at least {required_tokens:,} tokens to train this model effectively.")
+
+# Check if the dataset meets the recommended number of tokens
+if total_tokens >= required_tokens:
+    print("✅ The dataset meets or exceeds the recommended number of tokens for effective training.")
+else:
+    shortfall = required_tokens - total_tokens
+    print("⚠️ The dataset does NOT meet the recommended number of tokens for effective training.")
+    print(f"  You are short by {shortfall:,} tokens.")
+    print("  Consider either increasing the dataset size or reducing the model's parameters for optimal training.")
 
 # Track best losses and store losses for plotting
 best_train_loss = float('inf')
@@ -203,8 +231,11 @@ best_val_loss = float('inf')
 train_losses = []
 val_losses = []
 
-# Training loop
+# Training loop with early stopping
 start_time = time.time()
+patience = 1000
+patience_counter = 0
+
 for iter in tqdm(range(epochs), desc="Training Epochs"):
     # Training phase
     model.train()  # Set model to training mode
@@ -217,94 +248,57 @@ for iter in tqdm(range(epochs), desc="Training Epochs"):
     optimizer.step()
     train_losses.append(train_loss.item())
 
-    # Evaluation phase every eval_iter
+    # Validation phase
+    model.eval()  # Set model to evaluation mode
+    with torch.no_grad():  # Disable gradient calculation
+        X_val, Y_val = get_batch('val')
+        logits, val_loss = model(X_val, Y_val)
+    val_losses.append(val_loss.item())
+
+    # Log and print average train and validation losses
     if iter % eval_iter == 0:
-        model.eval()  # Set model to evaluation mode
-        val_losses_list = []
+        print(f"Epoch: {iter}, Train Loss: {train_loss.item()}, Val Loss: {val_loss}")
+    wandb.log({
+        'train_loss': train_loss.item(),
+        'val_loss': val_loss
+    })
 
-        for _ in range(eval_iter):
-            with torch.no_grad():  # Disable gradient calculation
-                X_val, Y_val = get_batch('val')
-                logits, val_loss = model(X_val, Y_val)
-                val_losses_list.append(val_loss.item())
-        
-        # Calculate mean of validation losses
-        avg_val_loss = sum(val_losses_list) / len(val_losses_list)
+    # Track best losses
+    if train_loss.item() < best_train_loss:
+        best_train_loss = train_loss.item()
+    if val_loss < best_val_loss:
+        best_val_loss = val_loss
+        patience_counter = 0  # Reset patience counter if validation loss improves
+    else:
+        patience_counter += 1  # Increment patience counter if validation loss does not improve
 
-        # Log and print average train and validation losses
-        print(f"Epoch: {iter}, Train Loss: {train_loss.item()}, Val Loss: {avg_val_loss}")
-        wandb.log({
-            'train_loss': train_loss.item(),
-            'val_loss': avg_val_loss
-        })
-
-        # Track best losses
-        if train_loss.item() < best_train_loss:
-            best_train_loss = train_loss.item()
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-        val_losses.append(avg_val_loss)
+    # # Check for early stopping
+    # if patience_counter >= patience:
+    #     print(f"Early stopping triggered after {iter} epochs.")
+    #     break
 
 end_time = time.time()
 train_time = end_time - start_time
 
 print(100*'*')
-# Load best losses from JSON file if it exists
-best_losses_file = 'best_losses.json'
-try:
-    with open(best_losses_file, 'r') as f:
-        best_losses = json.load(f)
-        best_train_loss = best_losses.get('best_train_loss', best_train_loss)
-        best_val_loss = best_losses.get('best_val_loss', best_val_loss)
-except FileNotFoundError:
-    best_losses = {
-        'best_train_loss': best_train_loss,
-        'best_val_loss': best_val_loss
-    }
-    with open(best_losses_file, 'w') as f:
-        json.dump(best_losses, f)
 
 print(f"Generated Text:")
 idx = torch.zeros((1,1), dtype=torch.long)
 generated_text = decode(model.generate(idx, max_new_tokens=2000)[0].tolist())
 print(generated_text)
-
-# Check if current run has better losses
-if best_train_loss < best_losses.get('best_train_loss', float('inf')) or best_val_loss < best_losses.get('best_val_loss', float('inf')):
-    # Save generated text to file
-    with open('generated_shakespeare_text.txt', 'w') as f:
-        f.write(generated_text)
-
-    # Update best losses and save to JSON file
-    best_losses['best_train_loss'] = best_train_loss
-    best_losses['best_val_loss'] = best_val_loss
-    with open(best_losses_file, 'w') as f:
-        json.dump(best_losses, f)
-
-    # Have wandb save the text file
-    wandb.save('generated_shakespeare_text.txt')
-    # also save an image of the training and validation loss curves
-    plt.plot(train_losses, label='train loss')
-    plt.plot(val_losses, label='val loss')
-    plt.legend()
-    plt.savefig('train_val_loss.png')
-    wandb.save('train_val_loss.png')
-    print("Current run beat the best losses. Generated text saved.")
-
-else:
-    print("Current run did not beat the best losses. Generated text not saved.")
 print(100*'*')
 print(100*'*')
+
+plt.plot(train_losses, label='train loss')
+plt.plot(val_losses, label='val loss')
+plt.legend()
+plt.show()
+# save plot to wandb
+plt.savefig('train_val_loss.png')
+wandb.save('train_val_loss.png')
 
 print(f"Best Train Loss: {best_train_loss}")
 print(f"Best Validation Loss: {best_val_loss}")
-# show total number of parameters in the model
-total_params = sum(p.numel() for p in model.parameters())
-print(f"Total number of parameters in the model: {total_params}")
-# show toal number of tokens in the dataset
-total_tokens = len(data)
-print(f"Total number of tokens in the dataset: {total_tokens}")
-print(f"According to Chinchilla Law, you need at least {total_params * 2} tokens to train this model.") # TODO: work on this
 
 # Ensure train_time and other parameters are defined before logging
 wandb.log({
