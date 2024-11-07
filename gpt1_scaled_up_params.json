@@ -1,0 +1,12 @@
+{
+    "n_emb": 256,
+    "batch_size": 32,
+    "block_size": 32,
+    "learning_rate": 0.0001,
+    "epochs": 50000,
+    "eval_iter": 200,
+    "n_layer": 2,
+    "n_heads": 4,
+    "dropout": 0.2,
+    "train_test_split": 0.85
+}
