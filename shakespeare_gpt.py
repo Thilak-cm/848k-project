@@ -6,7 +6,8 @@ import wandb
 from tqdm import tqdm
 import time
 import json
-torch.manual_seed(1337)
+# set seed for reproducibility
+# torch.manual_seed(1337)
 
 # initialize wandb
 wandb.init(project="GPT 2 848K")
@@ -41,6 +42,8 @@ epochs = params['epochs']
 eval_iter = params['eval_iter']
 dropout = params['dropout']
 train_test_split = params['train_test_split']
+
+wandb.config.update(params)
 
 # Check if MPS (Metal Performance Shaders) is available for use on Mac
 device = torch.device("mps" if torch.backends.mps.is_built() else "cpu")
@@ -225,18 +228,17 @@ else:
     print(f"  You are short by {shortfall:,} tokens.")
     print("  Consider either increasing the dataset size or reducing the model's parameters for optimal training.")
 
-# Track best losses and store losses for plotting
-best_train_loss = float('inf')
-best_val_loss = float('inf')
-train_losses = []
-val_losses = []
-
-# Training loop with early stopping
+# Track start time of training
 start_time = time.time()
 patience = 1000
 patience_counter = 0
+avg_train_losses = []
+avg_val_losses = []
 
 for iter in tqdm(range(epochs), desc="Training Epochs"):
+    train_losses = []
+    val_losses = []
+
     # Training phase
     model.train()  # Set model to training mode
     xb, yb = get_batch('train')
@@ -253,35 +255,35 @@ for iter in tqdm(range(epochs), desc="Training Epochs"):
     with torch.no_grad():  # Disable gradient calculation
         X_val, Y_val = get_batch('val')
         logits, val_loss = model(X_val, Y_val)
-    val_losses.append(val_loss.item())
+        val_losses.append(val_loss.item())
 
-    # Log and print average train and validation losses
+    # Evaluate at intervals and log to WandB
     if iter % eval_iter == 0:
-        print(f"Epoch: {iter}, Train Loss: {train_loss.item()}, Val Loss: {val_loss}")
-    wandb.log({
-        'train_loss': train_loss.item(),
-        'val_loss': val_loss
-    })
+        average_epoch_train_loss = sum(train_losses) / len(train_losses)
+        average_epoch_val_loss = sum(val_losses) / len(val_losses)
+        avg_train_losses.append(average_epoch_train_loss)
+        avg_val_losses.append(average_epoch_val_loss)
+        
+        print(f"Epoch {iter}: Average Train Loss: {average_epoch_train_loss:.4f}, Average Validation Loss: {average_epoch_val_loss:.4f}")
+        
+        # Log to WandB at interval
+        wandb.log({
+            'avg_train_loss': average_epoch_train_loss,
+            'avg_val_loss': average_epoch_val_loss
+        })
 
-    # Track best losses
-    if train_loss.item() < best_train_loss:
-        best_train_loss = train_loss.item()
-    if val_loss < best_val_loss:
-        best_val_loss = val_loss
-        patience_counter = 0  # Reset patience counter if validation loss improves
-    else:
-        patience_counter += 1  # Increment patience counter if validation loss does not improve
+        # Check for early stopping
+        if patience_counter >= patience:
+            print("Early stopping triggered.")
+            break
+        patience_counter = patience_counter + 1 if average_epoch_val_loss > average_epoch_train_loss else 0
 
-    # # Check for early stopping
-    # if patience_counter >= patience:
-    #     print(f"Early stopping triggered after {iter} epochs.")
-    #     break
-
+# End of training
 end_time = time.time()
 train_time = end_time - start_time
 
+# Generate text
 print(100*'*')
-
 print(f"Generated Text:")
 idx = torch.zeros((1,1), dtype=torch.long)
 generated_text = decode(model.generate(idx, max_new_tokens=2000)[0].tolist())
@@ -289,34 +291,30 @@ print(generated_text)
 print(100*'*')
 print(100*'*')
 
-plt.plot(train_losses, label='train loss')
-plt.plot(val_losses, label='val loss')
+# Calculate final average losses
+final_avg_train_loss = sum(avg_train_losses) / len(avg_train_losses)
+final_avg_val_loss = sum(avg_val_losses) / len(avg_val_losses)
+print(f"Final Average Train Loss: {final_avg_train_loss:.4f}")
+print(f"Final Average Validation Loss: {final_avg_val_loss:.4f}")
+
+# Plot train and validation losses
+plt.figure()
+plt.plot(range(0, len(avg_train_losses) * eval_iter, eval_iter), avg_train_losses, label='Train Loss')
+plt.plot(range(0, len(avg_val_losses) * eval_iter, eval_iter), avg_val_losses, label='Validation Loss')
+plt.xlabel("Epochs")
+plt.ylabel("Loss")
 plt.legend()
-plt.show()
-# save plot to wandb
+plt.title("Training and Validation Loss")
+# Save plot to WandB
 plt.savefig('train_val_loss.png')
 wandb.save('train_val_loss.png')
 
-print(f"Best Train Loss: {best_train_loss}")
-print(f"Best Validation Loss: {best_val_loss}")
+plt.show()
 
-# Ensure train_time and other parameters are defined before logging
 wandb.log({
-    'epochs': epochs,
-    "learning_rate": learning_rate,
-    "block_size": block_size,
-    "batch_size": batch_size,
-    "embedding_size": n_emb,
-    "optimizer": "AdamW",
-    "device": device,
-    "vocab_size": vocab_size,
-    "best_train_loss": best_train_loss,
-    "best_val_loss": best_val_loss,
-    'Training Time': train_time, 
-    'dropout': dropout,
-    'n_layer': n_layer,
-    'n_heads': n_heads,
-    'train_test_split': train_test_split,
+    'final_avg_train_loss': final_avg_train_loss,
+    'final_avg_val_loss': final_avg_val_loss,
+    'time_to_train': train_time,
     'total_params': total_params
 })
 
