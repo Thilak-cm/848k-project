@@ -6,6 +6,18 @@ import requests
 import time
 import math
 import inspect
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
+from torch.distributed import init_process_group, destroy_process_group
+import os
+from transformers import AutoTokenizer
+import wandb
+
+# Initialize wandb to this project
+wandb.init(project="GPT 2 848K")
+
+wandb.run.tags = ["GPT2 Flash Attention", "Sinusoidal Pos Embedding", "Shakesphere Dataset"]
+wandb.run.name = "Shakesphere GPT2 Flash"
 
 # GPT-2 is a decoder only transformer model
 # %%
@@ -28,25 +40,24 @@ class MLP(nn.Module):
 
 # This is for self attention block
 class CausalSelfAttention(nn.Module):
+    '''
+    this is for self attention decoder block (cuz it's causal)
+    '''
     def __init__(self, config):
-
         super().__init__() 
-        assert config.n_embed % config.n_head == 0
+        assert config.n_embed % config.n_head == 0 # This is for checking if the number of heads is divisible by the embedding dimension
         
         # This is for query, key and value projections
         self.c_attn = nn.Linear(config.n_embed, 3 * config.n_embed)  # combined linear projection for all three Q, K, V
         # This is for output projection
         self.c_proj = nn.Linear(config.n_embed, config.n_embed)
-
-        # This is for scaling the weights
+        # This is for initializing the weights with 1.0
         self.c_proj.NANOGPT_SCALE_INIT = 1.0
-
-
-        # Regularization
         self.n_head = config.n_head
         self.n_embed = config.n_embed
         # not really a bias but a mask, but following OpenAI naming convention
         self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size)).view(1, 1, config.block_size, config.block_size)) 
+        # reshaped like 1,1,T,T so that it can be broadcast with the batch size and attention head dimensions
 
     def forward(self, x):
         B, T, C = x.size() # Batch size, Sequence Length, Embedding dimensionality (n_embed)
@@ -77,7 +88,9 @@ class CausalSelfAttention(nn.Module):
 
 # This is for transformer block
 class Block(nn.Module):
-    # write 
+    '''
+    This is for transformer block
+    '''
 
     def __init__(self, config):
         super().__init__()
@@ -94,6 +107,7 @@ class Block(nn.Module):
         # this is called pre-normalization and is used in the "An Image is Worth 16x16 Words" paper
         return x
 
+# default 124M randomly initialized model
 @dataclass
 class GPTConfig:
     block_size: int = 1024 # Maximum sequence length
@@ -272,128 +286,79 @@ def compare(model, device):
     print("All weights match")
 ########################################################################################
 
-#%%
 
-# from torch.distributed import init_process_group, destroy_process_group
-# import os
-# ddp = int(os.environ.get('RANK', -1)) != -1
-
-
-# if ddp:  # For legends
-#     assert torch.cuda.is_available()
-#     init_process_group(backend='nccl')
-#     ddp_rank = int(os.environ['RANK'])  # GPU 0 has rank 0, GPU 1 has rank 1, etc.
-#     ddp_local_rank = int(os.environ['LOCAL_RANK']) # Local rank within the node
-#     ddp_world_size = int(os.environ['WORLD_SIZE']) # Number of GPUs
-
-#     device = f'cuda:{ddp_local_rank}'
-#     torch.cuda.set_device(device)   
-#     master_process = ddp_rank == 0  
-
-# else:
-#     ddp_rank = 0
-#     ddp_local_rank = 0
-#     ddp_world_size = 1
-#     master_process = True
-
-#     device = 'cpu'
-#     if torch.cuda.is_available():
-#         device = 'cuda'
-#     elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available(): # For kids
-#         device = "mps"
-#     print(f"using device: {device}" )
-
-device = 'cpu' # For noobs
-if torch.cuda.is_available(): # For adults
-    device = 'cuda'
-elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available(): # For kids
-    device = "mps"
-print(f"using device: {device}" )
-# %%
-########################################################################################
-# Loading a pretrained model and generating text
-# Generate text
-
-model = GPT.from_pretrained('gpt2')
-model.eval()
-model.to(device)
-compare(model, device)
-
-max_length = 30 # Maximum length of the generated text
-num_return_sequences = 5 # Number of different answers to generate
-
-# Prefix tokens
-from transformers import AutoTokenizer
-tokenizer = AutoTokenizer.from_pretrained('gpt2')
-
-tokens = tokenizer.encode("So, this morning I started studying for the interview in the lab. This was not", return_tensors='pt') # (8,)
-# tokens = torch.tensor(tokens, dtype=torch.long)
-# Repeat the tokens for the number of return sequences
-tokens = tokens.repeat(num_return_sequences, 1)  # (5, 8)
-x = tokens.to('cuda')
-
-# Another way
-# import tiktoken
-# enc = tiktoken.get_encoding('gpt2')
-# tokens = enc.encode("Hello, I'm a language model,")
-# tokens = torch.tensor(tokens, dtype=torch. long) # (8. )
-# tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # (5, 8)
-# x = tokens.to('cuda')
-
-
-# x - (B, T) - (Batch Size, Sequence Length)
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
-while x.size(1) < max_length:
-    model.eval()
-    with torch.no_grad():
-        logits = model(x)[0] #x, loss
-        probs = F.softmax(logits[:, -1, :], dim=-1)
-        topk_probs, topk_indices = torch.topk(probs, k=50, dim=-1)  #k=50 is GPT-2 default
-        ix = torch.multinomial(topk_probs, num_samples=1)
-        xcol = torch.gather(topk_indices, -1, ix)
-        x = torch.cat((x, xcol), dim=1)
-
-#print generated text
-for i in range(num_return_sequences):
-    print(tokenizer.decode(x[i, :].tolist()))
-    # print(enc.decode(x[i, :].tolist()))
-########################################################################################
-# %%
 
 class DataLoaderLite:
-    def __init__(self, B, T):
+    def __init__(self, B, T, process_rank, num_processes, device='cpu'):
         self.B, self.T = B, T
-
+        self.device = device
+        self.process_rank = process_rank
+        self.num_processes = num_processes
         information = requests.get("https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt")
         text = information.text
         # If you use this directly => tokens = tokenizer.encode(text, return_tensors='pt')
         # You'll get a warning because the text is too long and the model is too small because the model can take only 1024 tokens
+        tokenizer = AutoTokenizer.from_pretrained('gpt2')
         self.tokens = tokenizer.encode(text, return_tensors='pt')
         print(f"Loaded {len(self.tokens[0])} tokens")
         print(f"1 epoch = {len(self.tokens[0]) // (self.B * self.T)} iterations")
 
         # State 
-        self.current_position = 0
+        # Process 0 will start from 0, Process 1 will start from B*T, Process 2 will start from 2*B*T, etc.
+        self.current_position = self.B * self.T * self.process_rank
 
     def next_batch(self):
         B, T = self.B, self.T
         buf = torch.tensor(self.tokens[0][self.current_position:self.current_position + B*T + 1])
-        x = buf[:-1].view(B, T).to(device) 
-        y = buf[1:].view(B, T).to(device)
-        self.current_position += B*T
+        x = buf[:-1].view(B, T).to(self.device) 
+        y = buf[1:].view(B, T).to(self.device)
+        
+        # We need to jump B*T*num_processes to get the next batch
+        self.current_position += B*T*self.num_processes
 
-        if self.current_position + B*T + 1 >= len(self.tokens):
-            self.current_position = 0
+        # If we reach the end of the dataset, we need to start from the beginning
+        if self.current_position + B*T*self.num_processes + 1 >= len(self.tokens):
+            self.current_position = self.B * self.T * self.process_rank
         return x, y
 
+
+#%%
+
+# This is for distributed data parallelism
+ddp = int(os.environ.get('RANK', -1)) != -1
+
+# If ddp is true, then we need to initialize the process group
+if ddp:  # For legends
+    assert torch.cuda.is_available()
+    init_process_group(backend='nccl')
+    ddp_rank = int(os.environ['RANK'])  # GPU 0 has rank 0, GPU 1 has rank 1, etc.
+    ddp_local_rank = int(os.environ['LOCAL_RANK']) # Local rank within the node
+    ddp_world_size = int(os.environ['WORLD_SIZE']) # Number of GPUs
+
+    device = f'cuda:{ddp_local_rank}'
+    torch.cuda.set_device(device)   
+    master_process = ddp_rank == 0  
+else:
+    ddp_rank = 0
+    ddp_local_rank = 0
+    ddp_world_size = 1
+    master_process = True
+
+    device = 'cpu' # For noobs
+    if torch.cuda.is_available(): # For adults
+        device = 'cuda'
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available(): # For kids
+        device = "mps"
+    print(f"using device: {device}" )
+
+
+# This is for reproducibility
 torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
 # Good, bad and ugly numbers - Why 50304? 50304 % 128 = 0 and is even 
 model = GPT(GPTConfig(vocab_size=50304)).to(device)
-# model = GPT(GPTConfig()).to(device)
 model.to(device)
 
 # Python interpreter is very slow. So, we need to compile the model
@@ -402,10 +367,15 @@ model.to(device)
 # This is for linux only
 # model = torch.compile(model)
 
+# This is for ddp
+if ddp:
+    model = DDP(model, device_ids=[ddp_local_rank], output_device=ddp_local_rank)
+raw_model = model.module if ddp else model # Always contains the "raw" unwrapped model
+
 max_lr = 6e-4
 min_lr = max_lr / 10
 warmup_steps = 10
-max_steps = 50
+max_steps = 20
 def get_lr(it):
     # 1) Linear warmup for warmup_steps
     if it < warmup_steps:
@@ -419,21 +389,25 @@ def get_lr(it):
 
 # Now GPT-3 parameters are used for GPT-2
 # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8) # Optimizer
-optimizer = model.configure_optimizers(weight_decay=0.1, lr=6e-4, device=device)
+optimizer = raw_model.configure_optimizers(weight_decay=0.1, lr=6e-4, device=device)
 
 
 # This is for gradient accumulation
 total_batch_size = 2**19 # 500K tokens
 B, T = 4, 1024
-assert total_batch_size % (B * T) == 0, f"Batch size {total_batch_size} is not divisible by B * T = {B * T}"
-grad_accum_steps = total_batch_size // (B * T)
-print(f"Desired batch size: {total_batch_size}, Gradient Accumulation Steps: {grad_accum_steps}")
-train_loader = DataLoaderLite(B, T)
 
+#The below steps contain the number of steps to accumulate the gradients including multiple GPU steps too
+assert total_batch_size % (B * T * ddp_world_size) == 0, f"Batch size {total_batch_size} is not divisible by B * T = {B * T}"
+grad_accum_steps = total_batch_size // (B * T * ddp_world_size) 
+
+if master_process: # To print jsut one single time
+    print(f"Desired batch size: {total_batch_size}, Gradient Accumulation Steps: {grad_accum_steps}")
+train_loader = DataLoaderLite(B, T, process_rank=ddp_rank, num_processes=ddp_world_size, device=device)
 
 torch.cuda.empty_cache()
 # This is for TF32 - 19 bits: 1 sign, 8 range and 10 mantissa
 torch.set_float32_matmul_precision('high')
+best_train_loss_accum = 1e9
 avg_time = 0
 avg_tokens_per_sec = 0
 for i in range(max_steps):
@@ -447,10 +421,21 @@ for i in range(max_steps):
         #This is to use BP16
         with torch.amp.autocast(device_type=device, dtype=torch.bfloat16):
             logits, loss = model(x, targets=y)
+        
+        # we have to scale loss to account for gradient accumulation
+        # because the gradients just add on each successive backward()
+        # addiion of gradients corresponds to a SUM in the objective, but 
+        # instead of SUM, we want a MEAN. So we scale the loss by the number of gradient accumulation steps
         loss = loss / grad_accum_steps # This acts like normalizer since reduction is mean
         loss_accum += loss.item()
-        loss.backward()
+        
+        # loss.backward() # Do the backward pass 
+        if ddp: # Sync the gradients only on the last step
+            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1) 
+        loss.backward() # Do the backward pass and synchronize the gradients.
 
+    if ddp:
+        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG) # Average the loss across all GPUs
     # Gradient global clipping: Why is this used? Because the gradients can be very large and can cause overflow
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     
@@ -459,13 +444,113 @@ for i in range(max_steps):
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
     optimizer.step()
+
     # This completes all the operations without starting new operation
     torch.cuda.synchronize()
     t1 = time.time()
     avg_time += t1 - t0
-    tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps) / (t1 - t0)
+    tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size) / (t1 - t0)
     avg_tokens_per_sec += tokens_per_sec
-    print(f"Epoch: {i}, Loss: {loss_accum}, lr: {lr}, norm: {norm}, Time Difference: {(t1 - t0)* 1000}ms, #tokens/sec: {tokens_per_sec}")
+
+    best_train_loss_accum = min(best_train_loss_accum, loss_accum)
+    # Wandb logging
+    wandb.log({
+        'epochs': i,
+        "device": device,
+        "learning_rate": get_lr(i - 1),
+        "loss": loss_accum,
+        "norm": norm,
+        "mini_block_size": T,
+        "mini_batch_size": B, 
+        
+        # Parameters for the model
+        "embedding_size": model.config.n_embed,
+        "num_layers": model.config.n_layer,
+        "num_heads": model.config.n_head,
+        "total_params": sum(p.numel() for p in model.parameters()),
+        "trainable_params": sum(p.numel() for p in model.parameters() if p.requires_grad),
+        "vocab_size": model.config.vocab_size,
+        "dropout": 0,
+        
+        #Optimizer and learning rate
+        "optimizer": "AdamW",
+        "max_steps": max_steps,
+        "warmup_steps": warmup_steps,
+        "max_lr": max_lr,
+        "min_lr": min_lr,
+
+        # Parameters for gradient accumulation
+        "grad_accum_steps": grad_accum_steps,
+        "total_batch_size": total_batch_size,
+        "tokens_per_batch": train_loader.B * train_loader.T,
+        "total_tokens_per_step": train_loader.B * train_loader.T * grad_accum_steps,
+
+        # Parameters for time and number of tokens
+        "current_epoch_time": t1 - t0,
+        "tokens_per_sec": tokens_per_sec,
+        "avg_time": avg_time / (i + 1),
+        "avg_tokens_per_sec": avg_tokens_per_sec / (i + 1),
+        "best_train_loss": best_train_loss_accum  # Best training loss
+    })
+
+    if master_process:
+        print(f"Epoch: {i}, Loss: {loss_accum}, lr: {lr}, norm: {norm}, Time Difference: {(t1 - t0)* 1000}ms, #tokens/sec: {tokens_per_sec}")
 # %%
 print(f"Average time: {avg_time / max_steps * 1000}ms, Average tokens/sec: {avg_tokens_per_sec / max_steps}")
 
+
+# Destroy all processes if ddp is true
+if ddp: 
+    destroy_process_group()
+
+
+# # %%
+# ########################################################################################
+# # Loading a pretrained model and generating text
+# # Generate text
+
+# model = GPT.from_pretrained('gpt2')
+# model.eval()
+# model.to(device)
+# compare(model, device)
+
+# max_length = 30 # Maximum length of the generated text
+# num_return_sequences = 5 # Number of different answers to generate
+
+# # Prefix tokens
+# from transformers import AutoTokenizer
+# tokenizer = AutoTokenizer.from_pretrained('gpt2')
+
+# tokens = tokenizer.encode("So, this morning I started studying for the interview in the lab. This was not", return_tensors='pt') # (8,)
+# # tokens = torch.tensor(tokens, dtype=torch.long)
+# # Repeat the tokens for the number of return sequences
+# tokens = tokens.repeat(num_return_sequences, 1)  # (5, 8)
+# x = tokens.to('cuda')
+
+# # Another way
+# # import tiktoken
+# # enc = tiktoken.get_encoding('gpt2')
+# # tokens = enc.encode("Hello, I'm a language model,")
+# # tokens = torch.tensor(tokens, dtype=torch. long) # (8. )
+# # tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # (5, 8)
+# # x = tokens.to('cuda')
+
+
+# # x - (B, T) - (Batch Size, Sequence Length)
+# torch.manual_seed(42)
+# torch.cuda.manual_seed(42)
+# while x.size(1) < max_length:
+#     model.eval()
+#     with torch.no_grad():
+#         logits = model(x)[0] #x, loss
+#         probs = F.softmax(logits[:, -1, :], dim=-1)
+#         topk_probs, topk_indices = torch.topk(probs, k=50, dim=-1)  #k=50 is GPT-2 default
+#         ix = torch.multinomial(topk_probs, num_samples=1)
+#         xcol = torch.gather(topk_indices, -1, ix)
+#         x = torch.cat((x, xcol), dim=1)
+
+# #print generated text
+# for i in range(num_return_sequences):
+#     print(tokenizer.decode(x[i, :].tolist()))
+#     # print(enc.decode(x[i, :].tolist()))
+# ########################################################################################
