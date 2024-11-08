@@ -1,8 +1,0 @@
-{"time":"2024-11-06T16:54:13.0032613-05:00","level":"INFO","msg":"using version","core version":"0.18.5"}
-{"time":"2024-11-06T16:54:13.0032613-05:00","level":"INFO","msg":"created symlink","path":"C:\\UMD\\Sem 3\\CMSC848K Multimodal Foundation Models\\Project\\848k-project\\wandb\\run-20241106_165412-nc8xib9s\\logs\\debug-core.log"}
-{"time":"2024-11-06T16:54:13.1144394-05:00","level":"INFO","msg":"created new stream","id":"nc8xib9s"}
-{"time":"2024-11-06T16:54:13.1144394-05:00","level":"INFO","msg":"stream: started","id":"nc8xib9s"}
-{"time":"2024-11-06T16:54:13.1144394-05:00","level":"INFO","msg":"handler: started","stream_id":{"value":"nc8xib9s"}}
-{"time":"2024-11-06T16:54:13.1144394-05:00","level":"INFO","msg":"sender: started","stream_id":"nc8xib9s"}
-{"time":"2024-11-06T16:54:13.1144394-05:00","level":"INFO","msg":"writer: Do: started","stream_id":{"value":"nc8xib9s"}}
-{"time":"2024-11-06T16:54:13.3512564-05:00","level":"INFO","msg":"Starting system monitor"}
