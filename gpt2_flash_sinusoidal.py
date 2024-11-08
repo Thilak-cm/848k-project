@@ -1,22 +1,53 @@
+# To run this code for 8 GPUs, use the following command
+# torchrun --standalone --nproc_per_node=8 gpt2_flash_sinusoidal.py
+
 from models.GPT2FlashAttention import GPT, GPTConfig
 from dataset.ShakesphereDataset import DataLoaderLite
 import torch
+from torch.distributed import init_process_group, destroy_process_group
 import math
 import time
 import wandb
+import os
 
 # Initialize wandb to this project
 wandb.init(project="GPT 2 848K")
 
 wandb.run.tags = ["GPT2 Flash Attention", "Sinusoidal Pos Embedding", "Shakesphere Dataset"]
 wandb.run.name = "Shakesphere GPT2 Flash"
-# This is for device selection
-device = 'cpu' # For noobs
-if torch.cuda.is_available(): # For adults
-    device = 'cuda'
-elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available(): # For kids
-    device = "mps"
-print(f"using device: {device}" )
+
+
+# This is for distributed data parallelism
+ddp = int(os.environ.get('RANK', -1)) != -1
+
+# If ddp is true, then we need to initialize the process group
+if ddp:  # For legends
+    assert torch.cuda.is_available()
+    init_process_group(backend='nccl')
+    ddp_rank = int(os.environ['RANK'])  # GPU 0 has rank 0, GPU 1 has rank 1, etc.
+    ddp_local_rank = int(os.environ['LOCAL_RANK']) # Local rank within the node
+    ddp_world_size = int(os.environ['WORLD_SIZE']) # Number of GPUs
+
+    device = f'cuda:{ddp_local_rank}'
+    torch.cuda.set_device(device)   
+    master_process = ddp_rank == 0  
+
+else:
+    ddp_rank = 0
+    ddp_local_rank = 0
+    ddp_world_size = 1
+    master_process = True
+
+    device = 'cpu' # For noobs
+    if torch.cuda.is_available(): # For adults
+        device = 'cuda'
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available(): # For kids
+        device = "mps"
+    print(f"using device: {device}" )
+
+
+
+
 
 
 # This is for reproducibility
@@ -57,9 +88,13 @@ optimizer = model.configure_optimizers(weight_decay=0.1, lr=6e-4, device=device)
 # This is for gradient accumulation
 total_batch_size = 2**19 # 500K tokens
 B, T = 4, 1024
-assert total_batch_size % (B * T) == 0, f"Batch size {total_batch_size} is not divisible by B * T = {B * T}"
-grad_accum_steps = total_batch_size // (B * T)
-print(f"Desired batch size: {total_batch_size}, Gradient Accumulation Steps: {grad_accum_steps}")
+
+#The below steps contain the number of steps to accumulate the gradients including multiple GPU steps too
+assert total_batch_size % (B * T * ddp_world_size) == 0, f"Batch size {total_batch_size} is not divisible by B * T = {B * T}"
+grad_accum_steps = total_batch_size // (B * T * ddp_world_size) 
+
+if master_process: # To print jsut one single time
+    print(f"Desired batch size: {total_batch_size}, Gradient Accumulation Steps: {grad_accum_steps}")
 train_loader = DataLoaderLite(B, T)
 
 
