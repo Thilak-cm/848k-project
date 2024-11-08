@@ -70,6 +70,8 @@ def download(split):
         print(f"Downloading {data_url} to {data_filename}...")
         download_file(data_url, data_filename)
 
+# convert the example into a format that can be fed into the model, i.e.
+# batch of 4 options with shared context, mask covers the completion region, and label
 def render_example(example):
     """
     Given the example as a dictionary, render it as three torch tensors:
@@ -117,6 +119,7 @@ def iterate_examples(split):
             example = json.loads(line)
             yield example
 
+# evaluates the hugging face gpt model on our version of hellaswag
 @torch.no_grad()
 def evaluate(model_type, device):
 
