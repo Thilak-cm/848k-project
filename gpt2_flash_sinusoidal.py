@@ -3,6 +3,8 @@
 
 from models.GPT2FlashAttention import GPT, GPTConfig
 from dataset.ShakesphereDataset import DataLoaderLite
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
 import torch
 from torch.distributed import init_process_group, destroy_process_group
 import math
@@ -25,7 +27,7 @@ if ddp:  # For legends
     assert torch.cuda.is_available()
     init_process_group(backend='nccl')
     ddp_rank = int(os.environ['RANK'])  # GPU 0 has rank 0, GPU 1 has rank 1, etc.
-    ddp_local_rank = int(os.environ['LOCAL_RANK']) # Local rank within the node
+    ddp_local_rank = int(os.environ['LOCAL_RANK']) # Local rank of GPU within the node
     ddp_world_size = int(os.environ['WORLD_SIZE']) # Number of GPUs
 
     device = f'cuda:{ddp_local_rank}'
@@ -45,10 +47,7 @@ else:
         device = "mps"
     print(f"using device: {device}" )
 
-
-
-
-
+print("DDP: ", ddp)
 
 # This is for reproducibility
 torch.manual_seed(1337)
@@ -64,6 +63,11 @@ model.to(device)
 # computation is done by traversing once  
 # This is for linux only
 # model = torch.compile(model)
+
+# This is for ddp
+if ddp:
+    model = DDP(model, device_ids=[ddp_local_rank], output_device=ddp_local_rank)
+raw_model = model.module if ddp else model # Always contains the "raw" unwrapped model
 
 max_lr = 6e-4
 min_lr = max_lr / 10
@@ -82,7 +86,7 @@ def get_lr(it):
 
 # Now GPT-3 parameters are used for GPT-2
 # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8) # Optimizer
-optimizer = model.configure_optimizers(weight_decay=0.1, lr=6e-4, device=device)
+optimizer = raw_model.configure_optimizers(weight_decay=0.1, lr=6e-4, device=device)
 
 
 # This is for gradient accumulation
@@ -95,8 +99,7 @@ grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
 
 if master_process: # To print jsut one single time
     print(f"Desired batch size: {total_batch_size}, Gradient Accumulation Steps: {grad_accum_steps}")
-train_loader = DataLoaderLite(B, T)
-
+train_loader = DataLoaderLite(B, T, process_rank=ddp_rank, num_processes=ddp_world_size, device=device)
 
 torch.cuda.empty_cache()
 # This is for TF32 - 19 bits: 1 sign, 8 range and 10 mantissa
@@ -115,10 +118,21 @@ for i in range(max_steps):
         #This is to use BP16
         with torch.amp.autocast(device_type=device, dtype=torch.bfloat16):
             logits, loss = model(x, targets=y)
+        
+        # we have to scale loss to account for gradient accumulation
+        # because the gradients just add on each successive backward()
+        # addiion of gradients corresponds to a SUM in the objective, but 
+        # instead of SUM, we want a MEAN. So we scale the loss by the number of gradient accumulation steps
         loss = loss / grad_accum_steps # This acts like normalizer since reduction is mean
         loss_accum += loss.item()
-        loss.backward()
+        
+        # loss.backward() # Do the backward pass 
+        if ddp: # Sync the gradients only on the last step
+            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1) 
+        loss.backward() # Do the backward pass and synchronize the gradients.
 
+    if ddp:
+        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG) # Average the loss across all GPUs
     # Gradient global clipping: Why is this used? Because the gradients can be very large and can cause overflow
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     
@@ -132,7 +146,7 @@ for i in range(max_steps):
     torch.cuda.synchronize()
     t1 = time.time()
     avg_time += t1 - t0
-    tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps) / (t1 - t0)
+    tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size) / (t1 - t0)
     avg_tokens_per_sec += tokens_per_sec
 
     best_train_loss_accum = min(best_train_loss_accum, loss_accum)
@@ -176,7 +190,12 @@ for i in range(max_steps):
         "best_train_loss": best_train_loss_accum  # Best training loss
     })
 
-
-    print(f"Epoch: {i}, Loss: {loss_accum}, lr: {lr}, norm: {norm}, Time Difference: {(t1 - t0)* 1000}ms, #tokens/sec: {tokens_per_sec}")
+    if master_process:
+        print(f"Epoch: {i}, Loss: {loss_accum}, lr: {lr}, norm: {norm}, Time Difference: {(t1 - t0)* 1000}ms, #tokens/sec: {tokens_per_sec}")
 # %%
 print(f"Average time: {avg_time / max_steps * 1000}ms, Average tokens/sec: {avg_tokens_per_sec / max_steps}")
+
+
+# Destroy all processes if ddp is true
+if ddp: 
+    destroy_process_group()
