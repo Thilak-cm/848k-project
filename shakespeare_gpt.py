@@ -7,18 +7,17 @@ from tqdm import tqdm
 import time
 import json
 # set seed for reproducibility
-# torch.manual_seed(1337)
+torch.manual_seed(1337)
 
 # initialize wandb
 wandb.init(project="GPT 2 848K")
-wandb.run.tags = ['GPT 1', 'test run']
+wandb.run.tags = ['shakespeare text generation', 'test run', 'gelu activation', 'scaled down model']
 
 # pull from local folder
 filename = 'tinyshakespeare.txt'
 with open(filename, 'r') as f:
     text = f.read()
 
-# TODO: count how many params you're using in this code, and implement chinchilla law to understand how much data you need to ensure you aren't under training
 # get vocab
 vocab = list(sorted(set(text)))
 vocab_size = len(vocab)
@@ -130,7 +129,8 @@ class FeedForwardNN(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(n_emb, 4 * n_emb), # add a factor of 4 to n_emb as per GPT-2, just to make it more expressive, increasing complexity and computation
-            nn.ReLU(), # TODO: use GELU instead of ReLU
+            # nn.ReLU(),
+            nn.GELU(),
             nn.Linear(4 * n_emb, n_emb), # linear projection back into the residual pathway
             nn.Dropout(dropout) # add right before connetion before residual connection
         )
@@ -200,7 +200,7 @@ class NanoGPT(nn.Module):
             # sample from the distribution
             next_token = torch.multinomial(probs, num_samples=1) # Bx1
             # append newly generated token to input idx to obtain new input for next generation iteration
-            idx = torch.cat([idx, next_token], dim=-1) # Bx(T+1) # TODO: understand why this is dim=-1
+            idx = torch.cat([idx, next_token], dim=-1) # Bx(T+1)
         return idx
 
 model = NanoGPT()
