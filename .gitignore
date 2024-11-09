@@ -2,3 +2,4 @@ wandb/
 */__pycache__/
 */check_issue.py
 dataset/edu_fineweb10B/
+.DS_Store

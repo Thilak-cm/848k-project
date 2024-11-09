@@ -11,7 +11,6 @@ def load_tokens(filename):
     ptt = torch.tensor(npt, dtype=torch.long)
     return ptt 
 
-
 class DataLoaderLite:
     def __init__(self, B, T, process_rank, num_processes,split, device ='cpu',):
         self.B, self.T = B, T
