@@ -16,6 +16,7 @@ import os
 from transformers import AutoTokenizer
 import wandb
 import numpy as np
+from hellaswag import render_example, iterate_examples
 
 # Initialize wandb to this project
 wandb.init(project="GPT 2 848K")
@@ -418,7 +419,8 @@ raw_model = model.module if ddp else model # Always contains the "raw" unwrapped
 max_lr = 6e-4
 min_lr = max_lr / 10
 warmup_steps = 715
-max_steps = 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+max_steps = 20 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+# 20 is used for testing purposes
 
 # cosine annealing learning rate scheduler
 def get_lr(it):
