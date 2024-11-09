@@ -1,3 +1,6 @@
+# To run this code for 8 GPUs, use the following command
+# torchrun --standalone --nproc_per_node=8 gpt2.py
+
 from dataclasses import dataclass
 import torch
 import torch.nn as nn
@@ -12,6 +15,7 @@ from torch.distributed import init_process_group, destroy_process_group
 import os
 from transformers import AutoTokenizer
 import wandb
+import numpy as np
 
 # Initialize wandb to this project
 wandb.init(project="GPT 2 848K")
@@ -20,7 +24,6 @@ wandb.run.tags = ["GPT2 Flash Attention", "Sinusoidal Pos Embedding", "Shakesphe
 wandb.run.name = "Shakesphere GPT2 Flash"
 
 # GPT-2 is a decoder only transformer model
-# %%
 #This is for MLP block
 class MLP(nn.Module):
     
@@ -286,38 +289,55 @@ def compare(model, device):
 
 
 
+def load_tokens(filename):
+    try: npt = np.load(filename, allow_pickle=True)
+    except: npt = np.fromfile(filename, dtype=np.uint16)  # Replace dtype as needed
+
+    ptt = torch.tensor(npt, dtype=torch.long)
+    return ptt 
+
 class DataLoaderLite:
-    def __init__(self, B, T, process_rank, num_processes, device='cpu'):
+    def __init__(self, B, T, process_rank, num_processes,split, device ='cpu',):
         self.B, self.T = B, T
         self.device = device
         self.process_rank = process_rank
         self.num_processes = num_processes
-        information = requests.get("https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt")
-        text = information.text
-        # If you use this directly => tokens = tokenizer.encode(text, return_tensors='pt')
-        # You'll get a warning because the text is too long and the model is too small because the model can take only 1024 tokens
-        tokenizer = AutoTokenizer.from_pretrained('gpt2')
-        self.tokens = tokenizer.encode(text, return_tensors='pt')
-        print(f"Loaded {len(self.tokens[0])} tokens")
-        print(f"1 epoch = {len(self.tokens[0]) // (self.B * self.T)} iterations")
+        assert split in {'train', 'val'}
 
-        # State 
-        # Process 0 will start from 0, Process 1 will start from B*T, Process 2 will start from 2*B*T, etc.
+        master_process = process_rank ==0
+        #get the shared filenames
+        CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+        data_root = os.path.join(CURRENT_DIR, "edu_fineweb10B")
+        shards = os.listdir(data_root)
+        shards = [s for s in shards if split in s]
+        shards = sorted(shards)
+        shards = [os.path.join(data_root, s) for s in shards]
+        self.shards = shards
+        assert len(shards) > 0, f"no shards found for split {split}"
+        if master_process:
+            print(f"found {len(shards)} shards for split {split}")
+        
+        #state, init and shard zero
+        self.current_shard = 0
+        self.tokens = load_tokens(self.shards[self.current_shard])
         self.current_position = self.B * self.T * self.process_rank
+
 
     def next_batch(self):
         B, T = self.B, self.T
-        buf = torch.tensor(self.tokens[0][self.current_position:self.current_position + B*T + 1])
-        x = buf[:-1].view(B, T).to(self.device) 
-        y = buf[1:].view(B, T).to(self.device)
+        buf = torch.tensor(self.tokens[self.current_position:self.current_position + B*T + 1])
+        x = buf[:-1].view(B, T).to(self.device) #inputs
+        y = buf[1:].view(B, T).to(self.device)  #targets
         
-        # We need to jump B*T*num_processes to get the next batch
+        # We need to advance position B*T*num_processes to get the next batch in tensor
         self.current_position += B*T*self.num_processes
 
-        # If we reach the end of the dataset, we need to start from the beginning
-        if self.current_position + B*T*self.num_processes + 1 >= len(self.tokens):
-            self.current_position = self.B * self.T * self.process_rank
-        return x, y
+        # If loading the next shard would be out of bounds, advance to the next shard
+        if self.current_position +(B * T * self.num_processes + 1) > len(self.tokens):
+            self.current_shard = (self.current_shard + 1) % len(self.shards)
+            self.tokens = load_tokens(self.shards[self.current_shard])
+            self.current_position = B * T * self.process_rank
+        return x,y
 
 
 #%%
@@ -359,6 +379,30 @@ if torch.cuda.is_available():
 model = GPT(GPTConfig(vocab_size=50304)).to(device)
 model.to(device)
 
+# count number of parameters
+num_params = sum(p.numel() for p in model.parameters())
+num_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+print(f"Total number of parameters: {num_params}, Trainable parameters: {num_trainable_params}")
+
+total_tokens = 1e10 # 10B tokens
+
+# Chinchilla Scaling Law suggests that the optimal number of tokens should be about 2 times the number of parameters.
+# According to Chinchilla Law, we need at least 2 * total_params tokens
+required_tokens = num_params * 2
+print(f"According to Chinchilla Scaling Law, you need at least {required_tokens:,} tokens to train this model effectively.")
+
+# Check if the dataset meets the recommended number of tokens
+if total_tokens >= required_tokens:
+    print("✅ The dataset meets or exceeds the recommended number of tokens for effective training.")
+else:
+    shortfall = required_tokens - total_tokens
+    print("⚠️ The dataset does NOT meet the recommended number of tokens for effective training.")
+    print(f"  You are short by {shortfall:,} tokens.")
+    print("  Consider either increasing the dataset size or reducing the model's parameters for optimal training.")
+
+# log parameters to wandb
+wandb.watch(model, log="all")
+
 # Python interpreter is very slow. So, we need to compile the model
 # If compiled, in GPU, instead of traversing from HBM to cache for each single operation, 
 # computation is done by traversing once  
@@ -370,10 +414,13 @@ if ddp:
     model = DDP(model, device_ids=[ddp_local_rank], output_device=ddp_local_rank)
 raw_model = model.module if ddp else model # Always contains the "raw" unwrapped model
 
+# learning rate scheduler parameters
 max_lr = 6e-4
 min_lr = max_lr / 10
-warmup_steps = 10
-max_steps = 20
+warmup_steps = 715
+max_steps = 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+
+# cosine annealing learning rate scheduler
 def get_lr(it):
     # 1) Linear warmup for warmup_steps
     if it < warmup_steps:
@@ -387,8 +434,8 @@ def get_lr(it):
 
 # Now GPT-3 parameters are used for GPT-2
 # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8) # Optimizer
-optimizer = raw_model.configure_optimizers(weight_decay=0.1, lr=6e-4, device=device)
-
+weight_decay = 0.1
+optimizer = raw_model.configure_optimizers(weight_decay=weight_decay, lr=6e-4, device=device)
 
 # This is for gradient accumulation
 total_batch_size = 2**19 # 500K tokens
@@ -396,7 +443,32 @@ B, T = 4, 1024
 
 #The below steps contain the number of steps to accumulate the gradients including multiple GPU steps too
 assert total_batch_size % (B * T * ddp_world_size) == 0, f"Batch size {total_batch_size} is not divisible by B * T = {B * T}"
-grad_accum_steps = total_batch_size // (B * T * ddp_world_size) 
+grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
+
+wandb.config.update({
+    "batch_size": B,
+    "sequence_length": T,
+    "total_batch_size": total_batch_size,
+    "device": device,
+    "gradient_accumulation_steps": grad_accum_steps,
+    "world_size": ddp_world_size,
+
+    "embedding_size": model.config.n_embed,
+    "num_layers": model.config.n_layer,
+    "num_heads": model.config.n_head,
+    "total_params": num_params,
+    "trainable_params": num_trainable_params,
+    "total_params": num_params,
+    "vocab_size": model.config.vocab_size,
+    
+    "dropout": 0,
+    "optimizer": "AdamW",
+    "weight_decay": weight_decay,
+    "warmup_steps": warmup_steps,
+    "max_steps": max_steps,
+    "max_lr": max_lr,
+    "min_lr": min_lr
+})
 
 if master_process: # To print jsut one single time
     print(f"Desired batch size: {total_batch_size}, Gradient Accumulation Steps: {grad_accum_steps}")
@@ -408,6 +480,8 @@ torch.set_float32_matmul_precision('high')
 best_train_loss_accum = 1e9
 avg_time = 0
 avg_tokens_per_sec = 0
+
+# Training loop
 for i in range(max_steps):
     t0 = time.time()
     optimizer.zero_grad()
@@ -451,55 +525,28 @@ for i in range(max_steps):
     avg_tokens_per_sec += tokens_per_sec
 
     best_train_loss_accum = min(best_train_loss_accum, loss_accum)
-    # Wandb logging
-    wandb.log({
-        'epochs': i,
-        "device": device,
-        "learning_rate": get_lr(i - 1),
-        "loss": loss_accum,
-        "norm": norm,
-        "mini_block_size": T,
-        "mini_batch_size": B, 
-        
-        # Parameters for the model
-        "embedding_size": model.config.n_embed,
-        "num_layers": model.config.n_layer,
-        "num_heads": model.config.n_head,
-        "total_params": sum(p.numel() for p in model.parameters()),
-        "trainable_params": sum(p.numel() for p in model.parameters() if p.requires_grad),
-        "vocab_size": model.config.vocab_size,
-        "dropout": 0,
-        
-        #Optimizer and learning rate
-        "optimizer": "AdamW",
-        "max_steps": max_steps,
-        "warmup_steps": warmup_steps,
-        "max_lr": max_lr,
-        "min_lr": min_lr,
-
-        # Parameters for gradient accumulation
-        "grad_accum_steps": grad_accum_steps,
-        "total_batch_size": total_batch_size,
-        "tokens_per_batch": train_loader.B * train_loader.T,
-        "total_tokens_per_step": train_loader.B * train_loader.T * grad_accum_steps,
-
-        # Parameters for time and number of tokens
-        "current_epoch_time": t1 - t0,
-        "tokens_per_sec": tokens_per_sec,
-        "avg_time": avg_time / (i + 1),
-        "avg_tokens_per_sec": avg_tokens_per_sec / (i + 1),
-        "best_train_loss": best_train_loss_accum  # Best training loss
-    })
 
     if master_process:
         print(f"Epoch: {i}, Loss: {loss_accum}, lr: {lr}, norm: {norm}, Time Difference: {(t1 - t0)* 1000}ms, #tokens/sec: {tokens_per_sec}")
+        # Wandb logging
+        wandb.log({
+            "train_loss": loss_accum,
+            "best_train_loss": best_train_loss_accum,
+            "lr": get_lr(i-1),
+            "norm": norm,
+            "tokens_per_sec": tokens_per_sec,
+            "current_epoch_time": t1 - t0
+        })
 # %%
 print(f"Average time: {avg_time / max_steps * 1000}ms, Average tokens/sec: {avg_tokens_per_sec / max_steps}")
-
 
 # Destroy all processes if ddp is true
 if ddp: 
     destroy_process_group()
+
+# save the model
+wandb.save("model.pth")
+torch.save(model.state_dict(), "model.pth")
 
 
 # # %%
