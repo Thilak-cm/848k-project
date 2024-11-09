@@ -408,7 +408,7 @@ wandb.watch(model, log="all")
 # If compiled, in GPU, instead of traversing from HBM to cache for each single operation, 
 # computation is done by traversing once  
 # This is for linux only
-# model = torch.compile(model)
+model = torch.compile(model)
 
 # This is for ddp
 if ddp:
