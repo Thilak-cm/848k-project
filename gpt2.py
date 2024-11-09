@@ -298,7 +298,7 @@ def load_tokens(filename):
     return ptt 
 
 class DataLoaderLite:
-    def __init__(self, B, T, process_rank, num_processes,split, device ='cpu',):
+    def __init__(self, B, T, process_rank, num_processes, split, device ='cpu',):
         self.B, self.T = B, T
         self.device = device
         self.process_rank = process_rank
@@ -326,7 +326,11 @@ class DataLoaderLite:
 
     def next_batch(self):
         B, T = self.B, self.T
-        buf = torch.tensor(self.tokens[self.current_position:self.current_position + B*T + 1])
+        # UserWarning: To copy construct from a tensor, 
+        # it is recommended to use sourceTensor.clone().detach() or sourceTensor.clone().detach().requires_grad_(True), 
+        # rather than torch.tensor(sourceTensor)
+        # buf = torch.tensor(self.tokens[self.current_position:self.current_position + B*T + 1])
+        buf = self.tokens[self.current_position:self.current_position + B*T + 1].clone().detach()#.requires_grad_(True)
         x = buf[:-1].view(B, T).to(self.device) #inputs
         y = buf[1:].view(B, T).to(self.device)  #targets
         
@@ -408,7 +412,7 @@ wandb.watch(model, log="all")
 # If compiled, in GPU, instead of traversing from HBM to cache for each single operation, 
 # computation is done by traversing once  
 # This is for linux only
-model = torch.compile(model)
+# model = torch.compile(model)
 
 # This is for ddp
 if ddp:
@@ -474,7 +478,7 @@ wandb.config.update({
 
 if master_process: # To print jsut one single time
     print(f"Desired batch size: {total_batch_size}, Gradient Accumulation Steps: {grad_accum_steps}")
-train_loader = DataLoaderLite(B, T, process_rank=ddp_rank, num_processes=ddp_world_size, device=device)
+train_loader = DataLoaderLite(B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train", device=device)
 
 torch.cuda.empty_cache()
 # This is for TF32 - 19 bits: 1 sign, 8 range and 10 mantissa
