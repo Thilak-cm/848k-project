@@ -1,1 +1,2 @@
+edufineweb_train_99.npy filter=lfs diff=lfs merge=lfs -text
 *.pth !text !filter !merge !diff
