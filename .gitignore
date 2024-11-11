@@ -2,3 +2,4 @@ wandb/
 .DS_Store
 model.pth
 __pycache__/
+gpt2_ak_coding_test.py

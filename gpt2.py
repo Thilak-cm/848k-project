@@ -19,9 +19,9 @@ import numpy as np
 from hellaswag import render_example, iterate_examples
 
 # Initialize wandb to this project
-wandb.init(project="GPT 2 848K")
+wandb.init(project="GPT 2 848K Nexus Cluster")
 
-wandb.run.tags = ["GPT2 Flash Attention", "Sinusoidal Pos Embedding", "Shakesphere Dataset"]
+wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Flash Attention", "Gelu"]
 
 # GPT-2 is a decoder only transformer model
 #This is for MLP block
