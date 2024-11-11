@@ -19,7 +19,7 @@ import numpy as np
 from hellaswag import render_example, iterate_examples
 import tiktoken
 
-# Initialize wandb to this project
+# Initialize wandb to this project 
 wandb.init(project="GPT 2 848K Nexus Cluster")
 
 wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Flash Attention", "Gelu"]
@@ -323,6 +323,11 @@ class DataLoaderLite:
         self.tokens = load_tokens(self.shards[self.current_shard])
         self.current_position = self.B * self.T * self.process_rank
 
+    def reset(self):
+        # state, init at shard zero
+        self.current_shard = 0
+        self.tokens = load_tokens(self.shards[self.current_shard])
+        self.current_position = self.B * self.T * self.process_rank
 
     def next_batch(self):
         B, T = self.B, self.T
@@ -438,10 +443,10 @@ wandb.watch(model, log="all")
 # If compiled, in GPU, instead of traversing from HBM to cache for each single operation, 
 # computation is done by traversing once  
 # This is for linux only
-use_compile = False
+use_compile = True
 if use_compile:
     model = torch.compile(model)
- 
+
 # This is for ddp
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank], output_device=ddp_local_rank)
@@ -450,8 +455,8 @@ raw_model = model.module if ddp else model # Always contains the "raw" unwrapped
 # learning rate scheduler parameters
 max_lr = 6e-4
 min_lr = max_lr / 10
-warmup_steps = 715
-max_steps = 16073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+warmup_steps = 300 # 715
+max_steps = 8000 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
 # 20 is used for testing purposes
 
 # cosine annealing learning rate scheduler
@@ -511,7 +516,7 @@ wandb.config.update({
 if master_process: # To print jsut one single time
     print(f"Desired batch size: {total_batch_size}, Gradient Accumulation Steps: {grad_accum_steps}")
 train_loader = DataLoaderLite(B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train", device=device)
-val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val")
+val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val", device=device)
 
 torch.cuda.empty_cache()
 # This is for TF32 - 19 bits: 1 sign, 8 range and 10 mantissa
@@ -533,7 +538,7 @@ for step in range(max_steps):
     last_step = (step == max_steps - 1)
 
     # once in a while evaluate our validation loss
-    if step % 250 == 0 or last_step:
+    if step % 500 == 0 or last_step:
         model.eval()
         val_loader.reset()
         with torch.no_grad():
@@ -561,12 +566,13 @@ for step in range(max_steps):
                     'step': step,
                     'val_loss': val_loss_accum.item()
                 }
+                wandb.log({"val_loss": val_loss_accum.item()})
                 # you might also want to add optimizer.state_dict() and
                 # rng seeds etc., if you wanted to more exactly resume training
                 torch.save(checkpoint, checkpoint_path)
 
     # once in a while evaluate hellaswag
-    if (step % 250 == 0 or last_step) and (not use_compile):
+    if step % 500 == 0 or last_step:
         num_correct_norm = 0
         num_total = 0
         for i, example in enumerate(iterate_examples("val")):
@@ -595,12 +601,14 @@ for step in range(max_steps):
         acc_norm = num_correct_norm / num_total
         if master_process:
             # log the accuracy
-            print(f"HellaSwag accuracy: {num_correct_norm}/{num_total}={acc_norm:.4f}")
+            hellaswag_accuracy = acc_norm
+            print(f"HellaSwag accuracy: {num_correct_norm}/{num_total}={hellaswag_accuracy:.4f}")
+            wandb.log({"hellaswag_accuracy": hellaswag_accuracy})
             with open(log_file, "a") as f:
                 f.write(f"{step} hella {acc_norm:.4f}\n")
 
     # once in a while generate from the model (except step 0, which is noise)
-    if ((step > 0 and step % 250 == 0) or last_step) and (not use_compile):
+    if (step > 0 and step % 250 == 0) or last_step:
         model.eval()
         num_return_sequences = 4
         max_length = 32
@@ -665,12 +673,12 @@ for step in range(max_steps):
     if ddp:
         loss_accum_tensor = torch.tensor(loss_accum, device=device)  # Ensure the tensor is on the correct device
         dist.all_reduce(loss_accum_tensor, op=dist.ReduceOp.AVG)  # Average the loss across all GPUs
-    loss_accum = loss_accum_tensor.item()  # Get back the scalar value
+        loss_accum = loss_accum_tensor.item()  # Get back the scalar value
     # Gradient global clipping: Why is this used? Because the gradients can be very large and can cause overflow
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     
     # Learning rate scheduler
-    lr = get_lr(i)
+    lr = get_lr(step)
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
     optimizer.step()
@@ -685,12 +693,12 @@ for step in range(max_steps):
     best_train_loss_accum = min(best_train_loss_accum, loss_accum)
 
     if master_process:
-        print(f"Epoch: {i}, Loss: {loss_accum}, lr: {lr}, norm: {norm}, Time Difference: {(t1 - t0)* 1000}ms, #tokens/sec: {tokens_per_sec}")
+        print(f"Epoch: {step}, Loss: {loss_accum}, lr: {lr}, norm: {norm}, Time Difference: {(t1 - t0)* 1000}ms, #tokens/sec: {tokens_per_sec}")
         # Wandb logging
         wandb.log({
             "train_loss": loss_accum,
             "best_train_loss": best_train_loss_accum,
-            "lr": get_lr(i-1),
+            "lr": get_lr(step-1),
             "norm": norm,
             "tokens_per_sec": tokens_per_sec,
             "current_epoch_time": t1 - t0,
