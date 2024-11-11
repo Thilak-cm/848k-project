@@ -3,3 +3,4 @@ wandb/
 model.pth
 __pycache__/
 gpt2_ak_coding_test.py
+github_ssh*
