@@ -6,3 +6,4 @@ wandb/
 */check_issue.py
 dataset/edu_fineweb10B/
 .DS_Store
+github_ssh*
