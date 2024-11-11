@@ -451,7 +451,7 @@ raw_model = model.module if ddp else model # Always contains the "raw" unwrapped
 max_lr = 6e-4
 min_lr = max_lr / 10
 warmup_steps = 715
-max_steps = 16073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+max_steps = 15 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
 # 20 is used for testing purposes
 
 # cosine annealing learning rate scheduler
