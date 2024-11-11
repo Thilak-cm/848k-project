@@ -670,12 +670,12 @@ for step in range(max_steps):
     if ddp:
         loss_accum_tensor = torch.tensor(loss_accum, device=device)  # Ensure the tensor is on the correct device
         dist.all_reduce(loss_accum_tensor, op=dist.ReduceOp.AVG)  # Average the loss across all GPUs
-    loss_accum = loss_accum_tensor.item()  # Get back the scalar value
+        loss_accum = loss_accum_tensor.item()  # Get back the scalar value
     # Gradient global clipping: Why is this used? Because the gradients can be very large and can cause overflow
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     
     # Learning rate scheduler
-    lr = get_lr(i)
+    lr = get_lr(step)
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
     optimizer.step()
@@ -690,12 +690,12 @@ for step in range(max_steps):
     best_train_loss_accum = min(best_train_loss_accum, loss_accum)
 
     if master_process:
-        print(f"Epoch: {i}, Loss: {loss_accum}, lr: {lr}, norm: {norm}, Time Difference: {(t1 - t0)* 1000}ms, #tokens/sec: {tokens_per_sec}")
+        print(f"Epoch: {step}, Loss: {loss_accum}, lr: {lr}, norm: {norm}, Time Difference: {(t1 - t0)* 1000}ms, #tokens/sec: {tokens_per_sec}")
         # Wandb logging
         wandb.log({
             "train_loss": loss_accum,
             "best_train_loss": best_train_loss_accum,
-            "lr": get_lr(i-1),
+            "lr": get_lr(step-1),
             "norm": norm,
             "tokens_per_sec": tokens_per_sec,
             "current_epoch_time": t1 - t0,
