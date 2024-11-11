@@ -566,6 +566,7 @@ for step in range(max_steps):
                     'step': step,
                     'val_loss': val_loss_accum.item()
                 }
+                wandb.log({"val_loss": val_loss_accum.item()})
                 # you might also want to add optimizer.state_dict() and
                 # rng seeds etc., if you wanted to more exactly resume training
                 torch.save(checkpoint, checkpoint_path)
@@ -600,7 +601,9 @@ for step in range(max_steps):
         acc_norm = num_correct_norm / num_total
         if master_process:
             # log the accuracy
-            print(f"HellaSwag accuracy: {num_correct_norm}/{num_total}={acc_norm:.4f}")
+            hellaswag_accuracy = acc_norm
+            print(f"HellaSwag accuracy: {num_correct_norm}/{num_total}={hellaswag_accuracy:.4f}")
+            wandb.log({"hellaswag_accuracy": hellaswag_accuracy})
             with open(log_file, "a") as f:
                 f.write(f"{step} hella {acc_norm:.4f}\n")
 
