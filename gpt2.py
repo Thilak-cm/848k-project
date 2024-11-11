@@ -323,6 +323,11 @@ class DataLoaderLite:
         self.tokens = load_tokens(self.shards[self.current_shard])
         self.current_position = self.B * self.T * self.process_rank
 
+    def reset(self):
+        # state, init at shard zero
+        self.current_shard = 0
+        self.tokens = load_tokens(self.shards[self.current_shard])
+        self.current_position = self.B * self.T * self.process_rank
 
     def next_batch(self):
         B, T = self.B, self.T
@@ -438,7 +443,7 @@ wandb.watch(model, log="all")
 # If compiled, in GPU, instead of traversing from HBM to cache for each single operation, 
 # computation is done by traversing once  
 # This is for linux only
-use_compile = False
+use_compile = True
 if use_compile:
     model = torch.compile(model)
  
@@ -511,7 +516,7 @@ wandb.config.update({
 if master_process: # To print jsut one single time
     print(f"Desired batch size: {total_batch_size}, Gradient Accumulation Steps: {grad_accum_steps}")
 train_loader = DataLoaderLite(B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train", device=device)
-val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val")
+val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val", device=device)
 
 torch.cuda.empty_cache()
 # This is for TF32 - 19 bits: 1 sign, 8 range and 10 mantissa
