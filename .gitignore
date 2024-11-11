@@ -1,2 +1,4 @@
 wandb/
 .DS_Store
+model.pth
+__pycache__/
