@@ -7,3 +7,5 @@ wandb/
 dataset/edu_fineweb10B/
 .DS_Store
 github_ssh*
+gpt2-venv/
+slurm*
