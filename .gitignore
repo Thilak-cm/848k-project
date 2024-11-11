@@ -1,3 +1,6 @@
+__pycache__/
+edu_fineweb10B/
+hellaswag/
 wandb/
 */__pycache__/
 */check_issue.py
