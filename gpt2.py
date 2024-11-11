@@ -19,7 +19,7 @@ import numpy as np
 from hellaswag import render_example, iterate_examples
 import tiktoken
 
-# Initialize wandb to this project
+# Initialize wandb to this project 
 wandb.init(project="GPT 2 848K Nexus Cluster")
 
 wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Flash Attention", "Gelu"]
