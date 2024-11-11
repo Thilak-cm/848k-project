@@ -9,3 +9,5 @@ dataset/edu_fineweb10B/
 github_ssh*
 gpt2-venv/
 slurm*
+model.pth
+gpt2_ak_coding_test.py
