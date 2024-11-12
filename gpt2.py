@@ -539,6 +539,7 @@ for step in range(max_steps):
 
     # once in a while evaluate our validation loss
     if step % 500 == 0 or last_step:
+        if master_process:  print("evaluating validation loss:")
         model.eval()
         val_loader.reset()
         with torch.no_grad():
@@ -573,6 +574,7 @@ for step in range(max_steps):
 
     # once in a while evaluate hellaswag
     if step % 500 == 0 or last_step:
+        if master_process: print('evaluating hellaswag benchmark performance')
         num_correct_norm = 0
         num_total = 0
         for i, example in enumerate(iterate_examples("val")):
@@ -608,7 +610,7 @@ for step in range(max_steps):
                 f.write(f"{step} hella {acc_norm:.4f}\n")
 
     # once in a while generate from the model (except step 0, which is noise)
-    if (step > 0 and step % 250 == 0) or last_step:
+    if (step > 0 and step % 500 == 0) or last_step:
         model.eval()
         num_return_sequences = 4
         max_length = 32
@@ -638,10 +640,10 @@ for step in range(max_steps):
                 # append to the sequence
                 xgen = torch.cat((xgen, xcol), dim=1)
         # print the generated text
-        for step in range(num_return_sequences):
-            tokens = xgen[i, :max_length].tolist()
+        for i in range(num_return_sequences):
+            tokens = xgen[step, :max_length].tolist()
             decoded = enc.decode(tokens)
-            print(f"rank {ddp_rank} sample {i}: {decoded}")
+            print(f"rank {ddp_rank} sample {step}: {decoded}")
 
     # do one step of the optimization
     model.train()    
