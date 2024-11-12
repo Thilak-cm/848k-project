@@ -156,13 +156,18 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0, std=0.02)
 
-    def sinusoidal_positional_encoding(self, seq_len, embed_dim, device): #Generate sinusoidal positional encodings.
-        position = torch.arange(seq_len, dtype=torch.float, device=device).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, embed_dim, 2, dtype=torch.float, device=device) * -(math.log(10000.0) / embed_dim))
-        pe = torch.zeros(seq_len, embed_dim, device=device)
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        return pe
+    def get_sinusoidal_encoding(self, T):
+        # Generate position indices
+        position = torch.arange(0, T, dtype=torch.float).unsqueeze(1)  # Shape: (T, 1)
+        # Generate the scaling terms based on the embedding dimension
+        div_term = 10000 ** (-2 * torch.arange(self.n_emb // 2) / self.n_emb)  # Shape: (n_emb // 2,)
+        
+        # Initialize encoding tensor
+        encoding = torch.zeros(T, self.n_emb)  # Shape: (T, n_emb)
+        # Apply sine to even indices, cosine to odd indices
+        encoding[:, 0::2] = torch.sin(position * div_term)  # Even indices
+        encoding[:, 1::2] = torch.cos(position * div_term)  # Odd indices
+        return encoding
 
     def forward(self, idx, targets=None):
         B, T = idx.size()
