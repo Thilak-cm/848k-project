@@ -19,7 +19,7 @@ import numpy as np
 from hellaswag import render_example, iterate_examples
 import tiktoken
 
-# Initialize wandb to this project 
+# Initialize wandb to this project
 wandb.init(project="GPT 2 848K Nexus Cluster")
 
 wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Flash Attention", "Gelu"]
@@ -456,7 +456,7 @@ raw_model = model.module if ddp else model # Always contains the "raw" unwrapped
 max_lr = 6e-4
 min_lr = max_lr / 10
 warmup_steps = 300 # 715
-max_steps = 8000 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+max_steps = 5 # 8000 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
 # 20 is used for testing purposes
 
 # cosine annealing learning rate scheduler
@@ -533,12 +533,12 @@ with open(log_file, "w") as f: # open for writing to clear the file
     pass
 
 # Training loop
-for step in range(max_steps):
+for epoch in range(max_steps):
     t0 = time.time()
-    last_step = (step == max_steps - 1)
+    last_step = (epoch == max_steps - 1)
 
     # once in a while evaluate our validation loss
-    if step % 500 == 0 or last_step:
+    if epoch % 3 == 0 or last_step:
         if master_process:  print("evaluating validation loss:")
         model.eval()
         val_loader.reset()
@@ -557,14 +557,14 @@ for step in range(max_steps):
         if master_process:
             print(f"validation loss: {val_loss_accum.item():.4f}")
             with open(log_file, "a") as f:
-                f.write(f"{step} val {val_loss_accum.item():.4f}\n")
-            if step > 0 and (step % 5000 == 0 or last_step):
+                f.write(f"{epoch} val {val_loss_accum.item():.4f}\n")
+            if epoch > 0 and (epoch % 5000 == 0 or last_step):
                 # optionally write model checkpoints
-                checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
+                checkpoint_path = os.path.join(log_dir, f"model_{epoch:05d}.pt")
                 checkpoint = {
                     'model': raw_model.state_dict(),
                     'config': raw_model.config,
-                    'step': step,
+                    'epoch': epoch,
                     'val_loss': val_loss_accum.item()
                 }
                 wandb.log({"val_loss": val_loss_accum.item()})
@@ -573,13 +573,13 @@ for step in range(max_steps):
                 torch.save(checkpoint, checkpoint_path)
 
     # once in a while evaluate hellaswag
-    if step % 500 == 0 or last_step:
+    if epoch % 3 == 0 or last_step:
         if master_process: print('evaluating hellaswag benchmark performance')
         num_correct_norm = 0
         num_total = 0
         for i, example in enumerate(iterate_examples("val")):
-            # only process examples where step % ddp_world_size == ddp_rank
-            if step % ddp_world_size != ddp_rank:
+            # only process examples where epoch % ddp_world_size == ddp_rank
+            if epoch % ddp_world_size != ddp_rank:
                 continue
             # render the example into tokens and labels
             _, tokens, mask, label = render_example(example)
@@ -607,10 +607,10 @@ for step in range(max_steps):
             print(f"HellaSwag accuracy: {num_correct_norm}/{num_total}={hellaswag_accuracy:.4f}")
             wandb.log({"hellaswag_accuracy": hellaswag_accuracy})
             with open(log_file, "a") as f:
-                f.write(f"{step} hella {acc_norm:.4f}\n")
+                f.write(f"{epoch} hella {acc_norm:.4f}\n")
 
-    # once in a while generate from the model (except step 0, which is noise)
-    if (step > 0 and step % 500 == 0) or last_step:
+    # once in a while generate from the model (except epoch 0, which is noise)
+    if (epoch > 0 and epoch % 3 == 0) or last_step:
         model.eval()
         num_return_sequences = 4
         max_length = 32
@@ -641,11 +641,11 @@ for step in range(max_steps):
                 xgen = torch.cat((xgen, xcol), dim=1)
         # print the generated text
         for i in range(num_return_sequences):
-            tokens = xgen[step, :max_length].tolist()
+            tokens = xgen[i, :max_length].tolist()
             decoded = enc.decode(tokens)
-            print(f"rank {ddp_rank} sample {step}: {decoded}")
+            print(f"rank {ddp_rank} sample {i}: {decoded}")
 
-    # do one step of the optimization
+    # do one epoch of the optimization
     model.train()    
     
     
@@ -667,7 +667,7 @@ for step in range(max_steps):
         loss_accum += loss.item()
         
         # loss.backward() # Do the backward pass 
-        if ddp: # Sync the gradients only on the last step
+        if ddp: # Sync the gradients only on the last epoch
             model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1) 
         loss.backward() # Do the backward pass and synchronize the gradients.
 
@@ -680,10 +680,10 @@ for step in range(max_steps):
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     
     # Learning rate scheduler
-    lr = get_lr(step)
+    lr = get_lr(epoch)
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
-    optimizer.step()
+    optimizer.epoch()
 
     # This completes all the operations without starting new operation
     torch.cuda.synchronize()
@@ -695,17 +695,17 @@ for step in range(max_steps):
     best_train_loss_accum = min(best_train_loss_accum, loss_accum)
 
     if master_process:
-        print(f"Epoch: {step}, Loss: {loss_accum}, lr: {lr}, norm: {norm}, Time Difference: {(t1 - t0)* 1000}ms, #tokens/sec: {tokens_per_sec}")
+        print(f"Epoch: {epoch}, Loss: {loss_accum}, lr: {lr}, norm: {norm}, Time Difference: {(t1 - t0)* 1000}ms, #tokens/sec: {tokens_per_sec}")
         # Wandb logging
         wandb.log({
             "train_loss": loss_accum,
             "best_train_loss": best_train_loss_accum,
-            "lr": get_lr(step-1),
+            "lr": get_lr(epoch-1),
             "norm": norm,
             "tokens_per_sec": tokens_per_sec,
             "current_epoch_time": t1 - t0,
-            "avg_time_per_epoch": avg_time / (step + 1),
-            "avg_tokens_per_sec": avg_tokens_per_sec / (step + 1)
+            "avg_time_per_epoch": avg_time / (epoch + 1),
+            "avg_tokens_per_sec": avg_tokens_per_sec / (epoch + 1)
         })
 # %%
 print(f"Average time: {avg_time / max_steps * 1000}ms, Average tokens/sec: {avg_tokens_per_sec / max_steps}")
