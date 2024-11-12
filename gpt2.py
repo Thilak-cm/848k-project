@@ -683,7 +683,7 @@ for epoch in range(max_steps):
     lr = get_lr(epoch)
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
-    optimizer.epoch()
+    optimizer.step()
 
     # This completes all the operations without starting new operation
     torch.cuda.synchronize()
