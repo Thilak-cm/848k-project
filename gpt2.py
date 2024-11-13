@@ -252,14 +252,16 @@ class GPT(nn.Module):
         # Return number of elements (numel), which is the number of parameters
         num_decay_params = sum(p.numel() for p in decay_params)
         num_no_decay_params = sum(p.numel() for p in no_decay_params)
-        print(f"# Decayed parameter tensors: {len(decay_params)} with {num_decay_params} parameters")
-        print(f"# No Decay parameter tensors: {len(no_decay_params)} with {num_no_decay_params} parameters")
 
         # Check AdamW optimizer and use the fused verison if available
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and 'cuda' in device
-        print(f"Using Fused AdamW: {fused_available}")
         optimizer = torch.optim.AdamW(optim_groups, lr=lr, betas=(0.9, 0.95), eps=1e-8, weight_decay=weight_decay, fused=use_fused)
+        if master_process:
+            print(100*'-')
+            print(f"Using Fused AdamW: {fused_available}")
+            print(f"# Decayed parameter tensors: {len(decay_params)} with {num_decay_params} parameters")
+            print(f"# No Decay parameter tensors: {len(no_decay_params)} with {num_no_decay_params} parameters")
         return optimizer
 #%%    
 ########################################################################################
@@ -418,23 +420,26 @@ model.to(device)
 # count number of parameters
 num_params = sum(p.numel() for p in model.parameters())
 num_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+print(100 * '-')
 print(f"Total number of parameters: {num_params}, Trainable parameters: {num_trainable_params}")
 
 total_tokens = 1e10 # 10B tokens
 
-# Chinchilla Scaling Law suggests that the optimal number of tokens should be about 2 times the number of parameters.
-# According to Chinchilla Law, we need at least 2 * total_params tokens
-required_tokens = num_params * 2
-print(f"According to Chinchilla Scaling Law, you need at least {required_tokens:,} tokens to train this model effectively.")
+if master_process:
+    # Chinchilla Scaling Law suggests that the optimal number of tokens should be about 2 times the number of parameters.
+    # According to Chinchilla Law, we need at least 2 * total_params tokens
+    required_tokens = num_params * 2
+    print(100*'-')
+    print(f"According to Chinchilla Scaling Law, you need at least {required_tokens:,} tokens to train this model effectively.")
 
-# Check if the dataset meets the recommended number of tokens
-if total_tokens >= required_tokens:
-    print("✅ The dataset meets or exceeds the recommended number of tokens for effective training.")
-else:
-    shortfall = required_tokens - total_tokens
-    print("⚠️ The dataset does NOT meet the recommended number of tokens for effective training.")
-    print(f"  You are short by {shortfall:,} tokens.")
-    print("  Consider either increasing the dataset size or reducing the model's parameters for optimal training.")
+    # Check if the dataset meets the recommended number of tokens
+    if total_tokens >= required_tokens:
+        print("✅ The dataset meets or exceeds the recommended number of tokens for effective training.")
+    else:
+        shortfall = required_tokens - total_tokens
+        print("⚠️ The dataset does NOT meet the recommended number of tokens for effective training.")
+        print(f"  You are short by {shortfall:,} tokens.")
+        print("  Consider either increasing the dataset size or reducing the model's parameters for optimal training.")
 
 # log parameters to wandb
 wandb.watch(model, log="all")
@@ -455,8 +460,8 @@ raw_model = model.module if ddp else model # Always contains the "raw" unwrapped
 # learning rate scheduler parameters
 max_lr = 6e-4
 min_lr = max_lr / 10
-warmup_steps = 300 # 715
-max_steps = 5 # 8000 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+warmup_steps = 715
+max_steps = 5 # 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
 # 20 is used for testing purposes
 
 # cosine annealing learning rate scheduler
@@ -478,7 +483,7 @@ optimizer = raw_model.configure_optimizers(weight_decay=weight_decay, lr=6e-4, d
 
 # This is for gradient accumulation
 total_batch_size = 2**19 # 500K tokens
-B, T = 4, 1024
+B, T = 16, 1024
 
 #The below steps contain the number of steps to accumulate the gradients including multiple GPU steps too
 assert total_batch_size % (B * T * ddp_world_size) == 0, f"Batch size {total_batch_size} is not divisible by B * T = {B * T}"
@@ -538,7 +543,7 @@ for epoch in range(max_steps):
     last_step = (epoch == max_steps - 1)
 
     # once in a while evaluate our validation loss
-    if epoch % 3 == 0 or last_step:
+    if (epoch > 0 and epoch % 1000 == 0) or last_step or False:
         if master_process:  print("evaluating validation loss:")
         model.eval()
         val_loader.reset()
@@ -573,13 +578,13 @@ for epoch in range(max_steps):
                 torch.save(checkpoint, checkpoint_path)
 
     # once in a while evaluate hellaswag
-    if epoch % 3 == 0 or last_step:
+    if (epoch > 0 and epoch % 3 == 0) or last_step:
         if master_process: print('evaluating hellaswag benchmark performance')
         num_correct_norm = 0
         num_total = 0
         for i, example in enumerate(iterate_examples("val")):
             # only process examples where epoch % ddp_world_size == ddp_rank
-            if epoch % ddp_world_size != ddp_rank:
+            if i % ddp_world_size != ddp_rank:
                 continue
             # render the example into tokens and labels
             _, tokens, mask, label = render_example(example)
@@ -610,7 +615,7 @@ for epoch in range(max_steps):
                 f.write(f"{epoch} hella {acc_norm:.4f}\n")
 
     # once in a while generate from the model (except epoch 0, which is noise)
-    if (epoch > 0 and epoch % 3 == 0) or last_step:
+    if (epoch > 0 and epoch % 1000 == 0) or last_step or False:
         model.eval()
         num_return_sequences = 4
         max_length = 32
