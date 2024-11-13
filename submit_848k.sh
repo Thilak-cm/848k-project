@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:4
+#SBATCH --gres=gpu:rtxa5000:4
 #SBATCH --ntasks-per-node=1
 #SBATCH --mem-per-cpu=64gb
 #SBATCH --account=class

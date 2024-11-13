@@ -19,10 +19,48 @@ import numpy as np
 from hellaswag import render_example, iterate_examples
 import tiktoken
 
-# Initialize wandb to this project
-wandb.init(project="GPT 2 848K Nexus Cluster")
+#%%
+# This is for distributed data parallelism
+ddp = int(os.environ.get('RANK', -1)) != -1
 
-wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Flash Attention", "Gelu"]
+# If ddp is true, then we need to initialize the process group
+if ddp:  # For legends
+    assert torch.cuda.is_available()
+    init_process_group(backend='nccl')
+    ddp_rank = int(os.environ['RANK'])  # GPU 0 has rank 0, GPU 1 has rank 1, etc.
+    ddp_local_rank = int(os.environ['LOCAL_RANK']) # Local rank within the node
+    ddp_world_size = int(os.environ['WORLD_SIZE']) # Number of GPUs
+
+    device = f'cuda:{ddp_local_rank}'
+    torch.cuda.set_device(device)   
+    master_process = ddp_rank == 0  
+else:
+    ddp_rank = 0
+    ddp_local_rank = 0
+    ddp_world_size = 1
+    master_process = True
+
+    device = 'cpu' # For noobs
+    if torch.cuda.is_available(): # For adults
+        device = 'cuda'
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available(): # For kids
+        device = "mps"
+    print(f"using device: {device}" )
+
+# pytorch can be serious about device vs device type so we need to set it correctly
+# TODO: understand the difference between device and device type
+device_type = "cuda" if device.startswith("cuda") else "cpu"
+
+# This is for reproducibility
+torch.manual_seed(1337)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(1337)
+
+if master_process:
+    # Initialize wandb to this project
+    wandb.init(project="GPT 2 848K Nexus Cluster")
+
+    wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Flash Attention", "Gelu"]
 
 # GPT-2 is a decoder only transformer model
 #This is for MLP block
@@ -374,43 +412,6 @@ def get_most_likely_row(tokens, mask, logits):
     pred_norm = avg_loss.argmin().item()
     return pred_norm
 
-#%%
-# This is for distributed data parallelism
-ddp = int(os.environ.get('RANK', -1)) != -1
-
-# If ddp is true, then we need to initialize the process group
-if ddp:  # For legends
-    assert torch.cuda.is_available()
-    init_process_group(backend='nccl')
-    ddp_rank = int(os.environ['RANK'])  # GPU 0 has rank 0, GPU 1 has rank 1, etc.
-    ddp_local_rank = int(os.environ['LOCAL_RANK']) # Local rank within the node
-    ddp_world_size = int(os.environ['WORLD_SIZE']) # Number of GPUs
-
-    device = f'cuda:{ddp_local_rank}'
-    torch.cuda.set_device(device)   
-    master_process = ddp_rank == 0  
-else:
-    ddp_rank = 0
-    ddp_local_rank = 0
-    ddp_world_size = 1
-    master_process = True
-
-    device = 'cpu' # For noobs
-    if torch.cuda.is_available(): # For adults
-        device = 'cuda'
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available(): # For kids
-        device = "mps"
-    print(f"using device: {device}" )
-
-# pytorch can be serious about device vs device type so we need to set it correctly
-# TODO: understand the difference between device and device type
-device_type = "cuda" if device.startswith("cuda") else "cpu"
-
-# This is for reproducibility
-torch.manual_seed(1337)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed(1337)
-
 enc = tiktoken.get_encoding('gpt2')
 
 # Good, bad and ugly numbers - Why 50304? 50304 % 128 = 0 and is even 
@@ -420,8 +421,9 @@ model.to(device)
 # count number of parameters
 num_params = sum(p.numel() for p in model.parameters())
 num_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-print(100 * '-')
-print(f"Total number of parameters: {num_params}, Trainable parameters: {num_trainable_params}")
+if master_process:
+    print(100 * '-')
+    print(f"Total number of parameters: {num_params}, Trainable parameters: {num_trainable_params}")
 
 total_tokens = 1e10 # 10B tokens
 
@@ -442,15 +444,13 @@ if master_process:
         print("  Consider either increasing the dataset size or reducing the model's parameters for optimal training.")
 
 # log parameters to wandb
-wandb.watch(model, log="all")
+if master_process: wandb.watch(model, log="all")
 
 # Python interpreter is very slow. So, we need to compile the model
 # If compiled, in GPU, instead of traversing from HBM to cache for each single operation, 
 # computation is done by traversing once  
 # This is for linux only
-use_compile = True
-if use_compile:
-    model = torch.compile(model)
+model = torch.compile(model)
  
 # This is for ddp
 if ddp:
@@ -461,7 +461,7 @@ raw_model = model.module if ddp else model # Always contains the "raw" unwrapped
 max_lr = 6e-4
 min_lr = max_lr / 10
 warmup_steps = 715
-max_steps = 5 # 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+max_steps = 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
 # 20 is used for testing purposes
 
 # cosine annealing learning rate scheduler
@@ -489,7 +489,9 @@ B, T = 16, 1024
 assert total_batch_size % (B * T * ddp_world_size) == 0, f"Batch size {total_batch_size} is not divisible by B * T = {B * T}"
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
 
-wandb.config.update({
+if master_process: # To print jsut one single time
+    print(f"Desired batch size: {total_batch_size}, Gradient Accumulation Steps: {grad_accum_steps}")
+    wandb.config.update({
     # Training parameters
     "batch_size": B,
     "sequence_length": T,
@@ -516,10 +518,7 @@ wandb.config.update({
     # Parameter counts
     "total_params": num_params,
     "trainable_params": num_trainable_params,
-})
-
-if master_process: # To print jsut one single time
-    print(f"Desired batch size: {total_batch_size}, Gradient Accumulation Steps: {grad_accum_steps}")
+    })
 train_loader = DataLoaderLite(B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train", device=device)
 val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val", device=device)
 
@@ -543,7 +542,7 @@ for epoch in range(max_steps):
     last_step = (epoch == max_steps - 1)
 
     # once in a while evaluate our validation loss
-    if (epoch > 0 and epoch % 1000 == 0) or last_step or False:
+    if (epoch > 0 and epoch % 1000 == 0) or last_step:
         if master_process:  print("evaluating validation loss:")
         model.eval()
         val_loader.reset()
@@ -572,13 +571,13 @@ for epoch in range(max_steps):
                     'epoch': epoch,
                     'val_loss': val_loss_accum.item()
                 }
-                wandb.log({"val_loss": val_loss_accum.item()})
+                if master_process: wandb.log({"val_loss": val_loss_accum.item()})
                 # you might also want to add optimizer.state_dict() and
                 # rng seeds etc., if you wanted to more exactly resume training
                 torch.save(checkpoint, checkpoint_path)
 
     # once in a while evaluate hellaswag
-    if (epoch > 0 and epoch % 3 == 0) or last_step:
+    if (epoch > 0 and epoch % 1000 == 0) or last_step:
         if master_process: print('evaluating hellaswag benchmark performance')
         num_correct_norm = 0
         num_total = 0
@@ -610,12 +609,12 @@ for epoch in range(max_steps):
             # log the accuracy
             hellaswag_accuracy = acc_norm
             print(f"HellaSwag accuracy: {num_correct_norm}/{num_total}={hellaswag_accuracy:.4f}")
-            wandb.log({"hellaswag_accuracy": hellaswag_accuracy})
+            if master_process: wandb.log({"hellaswag_accuracy": hellaswag_accuracy})
             with open(log_file, "a") as f:
                 f.write(f"{epoch} hella {acc_norm:.4f}\n")
 
     # once in a while generate from the model (except epoch 0, which is noise)
-    if (epoch > 0 and epoch % 1000 == 0) or last_step or False:
+    if (epoch > 0 and epoch % 1000 == 0) or last_step:
         model.eval()
         num_return_sequences = 4
         max_length = 32
@@ -715,12 +714,13 @@ for epoch in range(max_steps):
 # %%
 print(f"Average time: {avg_time / max_steps * 1000}ms, Average tokens/sec: {avg_tokens_per_sec / max_steps}")
 
+if master_process: wandb.save("model.pth")
+
 # Destroy all processes if ddp is true
 if ddp: 
     destroy_process_group()
 
 # save the model
-wandb.save("model.pth")
 torch.save(model.state_dict(), "model.pth")
 print("Saved model artifact to wandb")
 
