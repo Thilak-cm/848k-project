@@ -530,7 +530,8 @@ avg_time = 0
 avg_tokens_per_sec = 0
 
 # create the log directory we will write checkpoints to and log to
-log_dir = "log"
+curr_dir = os.path.dirname(os.path.abspath(__file__))
+log_dir = f"{curr_dir}/log"
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, f"log.txt")
 with open(log_file, "w") as f: # open for writing to clear the file
@@ -575,6 +576,8 @@ for epoch in range(max_steps):
                 # you might also want to add optimizer.state_dict() and
                 # rng seeds etc., if you wanted to more exactly resume training
                 torch.save(checkpoint, checkpoint_path)
+                wandb.save("model.pth")
+                print("Saved model artifact in torch and wandb")
 
     # once in a while evaluate hellaswag
     if (epoch > 0 and epoch % 1000 == 0) or last_step:
@@ -713,8 +716,6 @@ for epoch in range(max_steps):
         })
 # %%
 if master_process:
-    wandb.save("model.pth")
-    print("Saved model artifact to wandb")
     print(f"Average time: {avg_time / max_steps * 1000}ms, Average tokens/sec: {avg_tokens_per_sec / max_steps}")
 
 # Destroy all processes if ddp is true
