@@ -588,10 +588,12 @@ for epoch in range(max_steps):
                     'epoch': epoch,
                     'val_loss': val_loss_accum.item()
                 }
-                if master_process: wandb.log({"val_loss": val_loss_accum.item()})
+                if master_process: 
+                    wandb.log({"val_loss": val_loss_accum.item()})
+                    wandb.save(f"model_{epoch}.pth")
                 # you might also want to add optimizer.state_dict() and
                 # rng seeds etc., if you wanted to more exactly resume training
-                torch.save(checkpoint, checkpoint_path)
+                # torch.save(checkpoint, checkpoint_path)
 
     # once in a while evaluate hellaswag
     if (epoch > 0 and epoch % 1000 == 0) or last_step:
@@ -739,7 +741,7 @@ if ddp:
     destroy_process_group()
 
 # save the model
-torch.save(model.state_dict(), "model.pth")
+# torch.save(model.state_dict(), "model.pth")
 
 
 # # %%
