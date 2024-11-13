@@ -712,9 +712,10 @@ for epoch in range(max_steps):
             "avg_tokens_per_sec": avg_tokens_per_sec / (epoch + 1)
         })
 # %%
-print(f"Average time: {avg_time / max_steps * 1000}ms, Average tokens/sec: {avg_tokens_per_sec / max_steps}")
-
-if master_process: wandb.save("model.pth")
+if master_process:
+    wandb.save("model.pth")
+    print("Saved model artifact to wandb")
+    print(f"Average time: {avg_time / max_steps * 1000}ms, Average tokens/sec: {avg_tokens_per_sec / max_steps}")
 
 # Destroy all processes if ddp is true
 if ddp: 
@@ -722,7 +723,6 @@ if ddp:
 
 # save the model
 torch.save(model.state_dict(), "model.pth")
-print("Saved model artifact to wandb")
 
 
 # # %%
