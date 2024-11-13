@@ -1,11 +1,11 @@
 #!/bin/bash
 
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:rtxa6000:2
+#SBATCH --gres=gpu:1
 #SBATCH --ntasks-per-node=1
 #SBATCH --mem-per-cpu=16gb
-#SBATCH --account=nexus
-#SBATCH --partition=tron
+#SBATCH --account=class
+#SBATCH --partition=class
 #SBATCH --qos medium
 #SBATCH -t 2-00:00:00
 #SBATCH --signal=SIGUSR1@90
