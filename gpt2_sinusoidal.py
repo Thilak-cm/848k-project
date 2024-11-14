@@ -546,13 +546,6 @@ best_train_loss_accum = 1e9
 avg_time = 0
 avg_tokens_per_sec = 0
 
-# create the log directory we will write checkpoints to and log to
-log_dir = "log"
-os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, f"log.txt")
-with open(log_file, "w") as f: # open for writing to clear the file
-    pass
-
 # Training loop
 for epoch in range(max_steps):
     t0 = time.time()
@@ -577,23 +570,13 @@ for epoch in range(max_steps):
             dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
         if master_process:
             print(f"validation loss: {val_loss_accum.item():.4f}")
-            with open(log_file, "a") as f:
-                f.write(f"{epoch} val {val_loss_accum.item():.4f}\n")
             if epoch > 0 and (epoch % 5000 == 0 or last_step):
-                # optionally write model checkpoints
-                checkpoint_path = os.path.join(log_dir, f"model_{epoch:05d}.pt")
-                checkpoint = {
-                    'model': raw_model.state_dict(),
-                    'config': raw_model.config,
-                    'epoch': epoch,
-                    'val_loss': val_loss_accum.item()
-                }
                 if master_process: 
                     wandb.log({"val_loss": val_loss_accum.item()})
+                    # you might also want to add optimizer.state_dict() and
+                    # rng seeds etc., if you wanted to more exactly resume training
                     wandb.save(f"model_{epoch}.pth")
-                # you might also want to add optimizer.state_dict() and
-                # rng seeds etc., if you wanted to more exactly resume training
-                # torch.save(checkpoint, checkpoint_path)
+                    print("Saved model artifact in torch and wandb")
 
     # once in a while evaluate hellaswag
     if (epoch > 0 and epoch % 1000 == 0) or last_step:
@@ -629,8 +612,6 @@ for epoch in range(max_steps):
             hellaswag_accuracy = acc_norm
             print(f"HellaSwag accuracy: {num_correct_norm}/{num_total}={hellaswag_accuracy:.4f}")
             if master_process: wandb.log({"hellaswag_accuracy": hellaswag_accuracy})
-            with open(log_file, "a") as f:
-                f.write(f"{epoch} hella {acc_norm:.4f}\n")
 
     # once in a while generate from the model (except epoch 0, which is noise)
     if (epoch > 0 and epoch % 1000 == 0) or last_step:
@@ -732,16 +713,12 @@ for epoch in range(max_steps):
         })
 # %%
 if master_process:
-    wandb.save("model.pth")
-    print("Saved model artifact to wandb")
+    wandb.save('final_epoch_model.pth')
     print(f"Average time: {avg_time / max_steps * 1000}ms, Average tokens/sec: {avg_tokens_per_sec / max_steps}")
 
 # Destroy all processes if ddp is true
 if ddp: 
     destroy_process_group()
-
-# save the model
-# torch.save(model.state_dict(), "model.pth")
 
 
 # # %%
