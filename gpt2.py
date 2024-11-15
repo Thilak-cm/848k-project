@@ -682,7 +682,8 @@ for epoch in range(max_steps):
     best_train_loss_accum = min(best_train_loss_accum, loss_accum)
 
     if master_process:
-        print(f"Epoch: {epoch}, Loss: {loss_accum}, lr: {lr}, norm: {norm}, Time Difference: {(t1 - t0)* 1000}ms, #tokens/sec: {tokens_per_sec}")
+        if epoch % 100 == 0:
+            print(f"Epoch: {epoch}, Loss: {loss_accum}, lr: {lr}, norm: {norm}, Time Difference: {(t1 - t0)* 1000}ms, #tokens/sec: {tokens_per_sec}")
         # Wandb logging
         wandb.log({
             "train_loss": loss_accum,
