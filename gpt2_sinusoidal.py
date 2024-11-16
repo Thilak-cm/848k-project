@@ -60,7 +60,7 @@ if master_process:
     # Initialize wandb to this project
     wandb.init(project="GPT 2 848K Nexus Cluster")
 
-    wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Flash Attention", "Gelu"]
+    wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Flash Attention", "Gelu", "Sinusoidal Positional Encoding"]
 
 # GPT-2 is a decoder only transformer model
 #This is for MLP block
@@ -166,7 +166,6 @@ class GPT(nn.Module):
         # Developing Transformer
         self.transformer = nn.ModuleDict({
             'wte': nn.Embedding(config.vocab_size, config.n_embed), # Token embedding weights
-            'wpe': nn.Embedding(config.block_size, config.n_embed), # Positional embedding weights
             'h': nn.ModuleList([Block(config) for _ in range(config.n_layer)]), # All transformer blocks
             'ln_f': nn.LayerNorm(config.n_embed)
         })
@@ -200,15 +199,33 @@ class GPT(nn.Module):
             # if module.padding_idx is not None:
             #     torch.nn.init.zeros_(module.weight[module.padding_idx])
 
+    def get_sinusoidal_encoding(self, T):
+        # Generate position indices
+        position = torch.arange(0, T, dtype=torch.float).unsqueeze(1)  # Shape: (T, 1)
+        # Generate the scaling terms based on the embedding dimension
+        div_term = 10000 ** (-2 * torch.arange(self.config.n_embed // 2) / self.config.n_embed)  # Shape: (config.n_embed // 2,)
+        
+        # Initialize encoding tensor
+        encoding = torch.zeros(T, self.config.n_embed)  # Shape: (T, config.n_embed)
+        # Apply sine to even indices, cosine to odd indices
+        encoding[:, 0::2] = torch.sin(position * div_term)  # Even indices
+        encoding[:, 1::2] = torch.cos(position * div_term)  # Odd indices
+        return encoding
+
+
     def forward(self, idx, targets=None):
         B, T = idx.size()
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, model block size is {self.config.block_size}"
 
-        # IMP: Token and Positional Embeddings
-        pos = torch.arange(0, T, device=idx.device, dtype=torch.long)
-        pos_emb = self.transformer.wpe(pos)  #Positional Embeddings of shape (T, n_embed)
-        tok_emb = self.transformer.wte(idx)  #Token Embeddings of shape (B, T, n_embed)
-        x = tok_emb + pos_emb # broadcast along the batch dimension
+        # Token Embeddings
+        tok_emb = self.transformer.wte(idx)  # Token Embeddings of shape (B, T, n_embed)
+
+        # Sinusoidal Positional Encodings
+        pos_emb = self.get_sinusoidal_encoding(T).to(idx.device)#, self.config.n_embed, idx.device)  # (T, n_embed)
+        pos_emb = pos_emb.unsqueeze(0).expand(B, -1, -1)  # Broadcast along batch dimension
+
+        # Combine token and positional embeddings
+        x = tok_emb + pos_emb
 
         # Forward pass through each transformer block
         for block in self.transformer.h:
