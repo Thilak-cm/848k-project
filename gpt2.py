@@ -116,14 +116,15 @@ class CausalSelfAttention(nn.Module):
 
 
         # Attention mechanism
-        # att = (q @ k.transpose(-2, -1)) * (1.0 / ((k.size(-1)) ** 0.5))
-        # # Masked Attention
-        # att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
-        # att = F.softmax(att, dim=-1)
-        # y = att @ v
+        att = (q @ k.transpose(-2, -1)) * (1.0 / ((k.size(-1)) ** 0.5))
+        # Masked Attention
+        att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+        att += alibi
+        att = F.softmax(att, dim=-1)
+        y = att @ v
 
         # Flash Attention
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # wow who knew flash attention was so easy to implement
+        # y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # wow who knew flash attention was so easy to implement
         y = y.transpose(1, 2).contiguous().view(B, T, self.n_head * (self.n_embed // self.n_head))
         # Output projection
         y = self.c_proj(y)
@@ -451,7 +452,7 @@ if master_process: wandb.watch(model, log="all")
 # computation is done by traversing once  
 # This is for linux only
 model = torch.compile(model)
- 
+
 # This is for ddp
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank], output_device=ddp_local_rank)
