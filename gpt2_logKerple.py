@@ -18,6 +18,8 @@ import wandb
 import numpy as np
 from hellaswag import render_example, iterate_examples
 import tiktoken
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
 
 #%%
 # This is for distributed data parallelism
@@ -60,7 +62,7 @@ if master_process:
     # Initialize wandb to this project
     wandb.init(project="GPT 2 848K Nexus Cluster")
 
-    wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Kerple Attention", "Gelu", "Kerple Log Positional Encoding", "BFloat16", "TF32", "DDP"]
+    wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Kerple Attention", "Gelu", "Kerple Log Positional Encoding"]
 
 class ClampedKerpleParameterModule(nn.Module):
     def __init__(self, num_heads, scale=1, min_value=1e-2):
@@ -69,31 +71,19 @@ class ClampedKerpleParameterModule(nn.Module):
         self.min_value = min_value
 
     # def stats(self):
-    #     def get_stats(name, obj):
-    #         return {name+'_mean': obj.mean().detach().cpu(),
-    #                 name+'_std': obj.std().detach().cpu(),
-    #                 name+'_max': obj.max().detach().cpu(),
-    #                 name+'_min': obj.min().detach().cpu()}
+    #     def get_stats(obj):
+    #         return {'mean': obj.mean().detach().cpu(),
+    #                 'std': obj.std().detach().cpu(),
+    #                 'max': obj.max().detach().cpu(),
+    #                 'min': obj.min().detach().cpu(),
+    #                 'values': obj.detach().cpu()}
     #     dd = {}
-    #     self.bias_a.data = self.bias_a.data.clamp(min=self.min_value)
-    #     dd.update(get_stats('bias_a', self.bias_a))
-    #     self.bias_p.data = self.bias_p.data.clamp(min=self.eps)
-    #     dd.update(get_stats('bias_p', self.bias_p))
+    #     dd.update(get_stats(self.param.data))
     #     return dd
-
-    def stats(self):
-        def get_stats(name, obj):
-            return {name+'_mean': obj.mean().detach().cpu(),
-                    name+'_std': obj.std().detach().cpu(),
-                    name+'_max': obj.max().detach().cpu(),
-                    name+'_min': obj.min().detach().cpu()}
-        dd = {}
-        dd.update(get_stats('param', self.param.data))
-        return dd
 
     def forward(self, x):
         clamped_param = torch.clamp(self.param, min=self.min_value)
-        return x.view(-1, 1, 1) * clamped_param
+        return clamped_param.view(-1, 1, 1) * x
 
 # GPT-2 is a decoder only transformer model
 #This is for MLP block
@@ -134,6 +124,7 @@ class CausalSelfAttention(nn.Module):
         self.n_embed = config.n_embed
         self.block_size = config.block_size
 
+
         # The formula for Kerple is -r2 * log(1 + |m - n| * r1) where r1 and r2 > 0
         # self.r1 = torch.nn.Parameter(torch.rand(self.n_head))
         # self.r2 = torch.nn.Parameter(torch.rand(self.n_head))
@@ -142,20 +133,21 @@ class CausalSelfAttention(nn.Module):
         # not really a bias but a mask, but following OpenAI naming convention
         self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size)).view(1, 1, config.block_size, config.block_size)) 
 
-    def KerplePositionalEncoding(self):
+    def KerplePositionalEncoding(self, q_shape, k_shape):
         # Code: https://github.com/chijames/KERPLE/blob/main/megatron/mpu/layers.py#L192
 
         # Precompute the distance matrix |m - n| and apply scaling for ALiBi
-        pos = torch.arange(self.block_size).view(-1, 1) - torch.arange(self.block_size).view(1, -1)
-        self.distance_matrix = pos.abs().float().to(device)  # Shape: (block_size, block_size)
+        pos = torch.arange(q_shape[2]).view(-1, 1) - torch.arange(k_shape[2]).view(1, -1)
+        distance_matrix = pos.abs().float().to(device)  # Shape: (block_size, block_size)
 
         # The formula for Kerple is -r2 * log(1 + |m - n| * r1) where r1 and r2 > 0
-        self.distance_matrix = self.r1(self.distance_matrix.repeat(self.n_head, 1, 1))  # Shape: (n_head, block_size, block_size)
-        self.distance_matrix = -self.r2(1 + torch.log(1 + self.distance_matrix))  # Shape: (block_size, block_size)
+        distance_matrix = self.r1(distance_matrix.repeat(self.n_head, 1, 1))  # Shape: (n_head, block_size, block_size)
+        distance_matrix = -self.r2(1 + torch.log(1 + distance_matrix))  # Shape: (block_size, block_size)
         
         # Mask out the upper triangular part of the distance matrix
-        bias = torch.ones(self.block_size, self.block_size).tril(diagonal=0)
-        self.distance_matrix = self.distance_matrix.masked_fill(bias.logical_not(), float('-inf'))  # Shape: (block_size, block_size)
+        mask = torch.ones(q_shape[2], k_shape[2]).tril(diagonal=0).repeat(self.n_head, 1, 1)
+        assert mask.shape == distance_matrix.shape, f"Mask shape is {mask.shape} whereas distance_matrix shape is {distance_matrix.shape}"
+        distance_matrix = distance_matrix.masked_fill(mask.logical_not().to(device), float('-inf'))  # Shape: (block_size, block_size)
 
 
     def forward(self, x):
@@ -183,8 +175,8 @@ class CausalSelfAttention(nn.Module):
         #is_causal = True implies that the attention mechanism uses only the past tokens (decoder style)
         #You cannot add is_causal=True and attn_mask at the same time as there is an assertion error 
         #if is_causal: assert attn_mask is None. So, we use only the lower triangular matrix from the attn_mask for decoder status
-        self.KerplePositionalEncoding()
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=False, attn_mask=self.distance_matrix) # wow who knew flash attention was so easy to implement
+        kerple_bias_matrix = self.KerplePositionalEncoding(q.shape, k.shape)
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=False, attn_mask=kerple_bias_matrix) # wow who knew flash attention was so easy to implement
         y = y.transpose(1, 2).contiguous().view(B, T, self.n_head * (self.n_embed // self.n_head))
         # Output projection
         y = self.c_proj(y)
@@ -501,14 +493,14 @@ if master_process:
         print(f"  You are short by {shortfall:,} tokens.")
         print("  Consider either increasing the dataset size or reducing the model's parameters for optimal training.")
 
-# log parameters to wandb
-if master_process: wandb.watch(model, log="all")
+    # log parameters to wandb
+    wandb.watch(model, log="all")
 
 # Python interpreter is very slow. So, we need to compile the model
 # If compiled, in GPU, instead of traversing from HBM to cache for each single operation, 
 # computation is done by traversing once  
 # This is for linux only
-# model = torch.compile(model)
+model = torch.compile(model)
  
 # This is for ddp
 if ddp:
@@ -519,7 +511,7 @@ raw_model = model.module if ddp else model # Always contains the "raw" unwrapped
 max_lr = 6e-4
 min_lr = max_lr / 10
 warmup_steps = 715
-max_steps = 10 #19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+max_steps = 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
 # 20 is used for testing purposes
 
 # cosine annealing learning rate scheduler
@@ -541,7 +533,7 @@ optimizer = raw_model.configure_optimizers(weight_decay=weight_decay, lr=6e-4, d
 
 # This is for gradient accumulation
 total_batch_size = 2**19 # 500K tokens
-B, T = 1, 1024#16, 1024
+B, T = 16, 1024
 
 #The below steps contain the number of steps to accumulate the gradients including multiple GPU steps too
 assert total_batch_size % (B * T * ddp_world_size) == 0, f"Batch size {total_batch_size} is not divisible by B * T = {B * T}"
@@ -592,7 +584,7 @@ for epoch in range(max_steps):
     t0 = time.time()
     last_step = (epoch == max_steps - 1)
 
-    if False and ((epoch > 0 and epoch % 1000 == 0) or last_step):
+    if ((epoch > 0 and epoch % 1000 == 0) or last_step):
         ########## once in a while evaluate our validation loss
         if master_process:  print("evaluating validation loss:")
         model.eval()
@@ -690,8 +682,8 @@ for epoch in range(max_steps):
 
     # do one epoch of the optimization
     model.train()    
-    
-    
+
+
     optimizer.zero_grad()
     loss_accum = 0.0
     # This is for gradient accumulation
@@ -713,11 +705,7 @@ for epoch in range(max_steps):
         if ddp: # Sync the gradients only on the last epoch
             model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1) 
         loss.backward() # Do the backward pass and synchronize the gradients.
-
-        #Check whether r1 and r2 are working properly
-        for block in model.transfomer.h:
-            print(block.attn.r1.stats())
-            print(block.attn.r2.stats())
+      
 
     # Accumulate loss across all GPUs if using DDP
     if ddp:
@@ -743,8 +731,7 @@ for epoch in range(max_steps):
     best_train_loss_accum = min(best_train_loss_accum, loss_accum)
 
     if master_process:
-        if epoch % 100 == 0:
-            print(f"Epoch: {epoch}, Loss: {loss_accum}, lr: {lr}, norm: {norm}, Time Difference: {(t1 - t0)* 1000}ms, #tokens/sec: {tokens_per_sec}")
+        print(f"Epoch: {epoch}, Loss: {loss_accum}, lr: {lr}, norm: {norm}, Time Difference: {(t1 - t0)* 1000}ms, #tokens/sec: {tokens_per_sec}")
         # Wandb logging
         wandb.log({
             "train_loss": loss_accum,
@@ -756,6 +743,7 @@ for epoch in range(max_steps):
             "avg_time_per_epoch": avg_time / (epoch + 1),
             "avg_tokens_per_sec": avg_tokens_per_sec / (epoch + 1)
         })
+
 # %%
 if master_process:
     wandb.save('final_epoch_model.pth')
