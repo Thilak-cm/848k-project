@@ -18,8 +18,6 @@ import wandb
 import numpy as np
 from hellaswag import render_example, iterate_examples
 import tiktoken
-import torch._dynamo
-torch._dynamo.config.suppress_errors = True
 
 #%%
 # This is for distributed data parallelism
@@ -62,41 +60,7 @@ if master_process:
     # Initialize wandb to this project
     wandb.init(project="GPT 2 848K Nexus Cluster")
 
-    wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Kerple Attention", "Gelu", "Kerple Log Positional Encoding"]
-
-class ClampedKerpleParameterModule(nn.Module):
-    def __init__(self, num_heads, scale=1, min_value=1e-2):
-        super().__init__()
-        self.param = nn.Parameter(torch.rand(num_heads) * scale)
-        self.min_value = min_value
-
-    def forward(self, x):
-        clamped_param = torch.clamp(self.param, min=self.min_value)
-        return clamped_param.view(-1, 1, 1) * x
-
-class KerplePositionalEncoding(nn.Module):
-    def __init__(self, num_heads, scale_r1=1, scale_r2=2, min_value=1e-2):
-        super().__init__()
-        self.r1 = ClampedKerpleParameterModule(num_heads, scale=scale_r1, min_value=min_value)
-        self.r2 = ClampedKerpleParameterModule(num_heads, scale=scale_r2, min_value=min_value)
-        self.n_head = num_heads
-
-    def forward(self, q_shape, k_shape):
-        # Code: https://github.com/chijames/KERPLE/blob/main/megatron/mpu/layers.py#L192
-        # Precompute the distance matrix |m - n| and apply scaling
-        pos = torch.arange(q_shape[2]).view(-1, 1) - torch.arange(k_shape[2]).view(1, -1)
-        distance_matrix = pos.abs().float().to(device)  # Shape: (block_size, block_size)
-
-        # The formula for Kerple is -r2 * log(1 + |m - n| * r1) where r1 and r2 > 0
-        distance_matrix = self.r1(distance_matrix.repeat(self.n_head, 1, 1))  # Shape: (n_head, block_size, block_size)
-        distance_matrix = -self.r2(1 + torch.log(1 + distance_matrix))  # Shape: (block_size, block_size)
-
-        # Mask out the upper triangular part of the distance matrix
-        mask = torch.ones(q_shape[2], k_shape[2]).tril(diagonal=0).repeat(self.n_head, 1, 1)
-        assert mask.shape == distance_matrix.shape, f"Mask shape is {mask.shape} whereas distance_matrix shape is {distance_matrix.shape}"
-        distance_matrix = distance_matrix.masked_fill(mask.logical_not().to(device), float('-inf'))  # Shape: (block_size, block_size)
-
-        return distance_matrix
+    wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Flash Attention", "Gelu", "ALiBi Positional Encoding"]
 
 # GPT-2 is a decoder only transformer model
 #This is for MLP block
@@ -116,7 +80,6 @@ class MLP(nn.Module):
         x = self.c_proj(x)
         return x
 
-
 # This is for self attention block
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
@@ -132,37 +95,21 @@ class CausalSelfAttention(nn.Module):
         # This is for scaling the weights
         self.c_proj.NANOGPT_SCALE_INIT = 1.0
 
+
         # Regularization
         self.n_head = config.n_head
         self.n_embed = config.n_embed
-        self.block_size = config.block_size
-
-
-        # The formula for Kerple is -r2 * log(1 + |m - n| * r1) where r1 and r2 > 0
-        # self.r1 = torch.nn.Parameter(torch.rand(self.n_head))
-        # self.r2 = torch.nn.Parameter(torch.rand(self.n_head))
-        # self.r1 = ClampedKerpleParameterModule(self.n_head, scale=1, min_value=1e-2).to(device)
-        # self.r2 = ClampedKerpleParameterModule(self.n_head, scale=2, min_value=1e-2).to(device)
-        self.kerple_bias_matrix = KerplePositionalEncoding(self.n_head)
         # not really a bias but a mask, but following OpenAI naming convention
         self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size)).view(1, 1, config.block_size, config.block_size)) 
 
-    def KerplePositionalEncoding(self, q_shape, k_shape):
-        # Code: https://github.com/chijames/KERPLE/blob/main/megatron/mpu/layers.py#L192
-
-        # Precompute the distance matrix |m - n| and apply scaling
-        pos = torch.arange(q_shape[2]).view(-1, 1) - torch.arange(k_shape[2]).view(1, -1)
-        distance_matrix = pos.abs().float().to(device)  # Shape: (block_size, block_size)
-
-        # The formula for Kerple is -r2 * log(1 + |m - n| * r1) where r1 and r2 > 0
-        distance_matrix = self.r1(distance_matrix.repeat(self.n_head, 1, 1))  # Shape: (n_head, block_size, block_size)
-        distance_matrix = -self.r2(1 + torch.log(1 + distance_matrix))  # Shape: (block_size, block_size)
-        
-        # Mask out the upper triangular part of the distance matrix
-        mask = torch.ones(q_shape[2], k_shape[2]).tril(diagonal=0).repeat(self.n_head, 1, 1)
-        assert mask.shape == distance_matrix.shape, f"Mask shape is {mask.shape} whereas distance_matrix shape is {distance_matrix.shape}"
-        distance_matrix = distance_matrix.masked_fill(mask.logical_not().to(device), float('-inf'))  # Shape: (block_size, block_size)
-        return distance_matrix
+    def alibi_mask(self, q_shape):
+        # To create an alibi_mask, q* k_T + m * [a - b] where m = 2**(-8/head_number). 
+        # [a - b] is a lower triangular matrix with all negative values.
+        # Why q_shape[2]? Because it contains sequence length 
+        pos = - torch.arange(q_shape[2]).view(-1, 1) + torch.arange(q_shape[2]).view(1, -1)
+        pos = pos.float().masked_fill(pos > 0, float('-inf'))  # Shape: (block_size, block_size)
+        head_m_value = torch.tensor([2.0**(-8/i) for i in torch.linspace(1, 8, self.n_head)])
+        return head_m_value.view(-1, 1, 1) * pos
 
     def forward(self, x):
         B, T, C = x.size() # Batch size, Sequence Length, Embedding dimensionality (n_embed)
@@ -185,18 +132,7 @@ class CausalSelfAttention(nn.Module):
         # y = att @ v
 
         # Flash Attention
-        # y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # wow who knew flash attention was so easy to implement
-        #is_causal = True implies that the attention mechanism uses only the past tokens (decoder style)
-        #You cannot add is_causal=True and attn_mask at the same time as there is an assertion error 
-        #if is_causal: assert attn_mask is None. So, we use only the lower triangular matrix from the attn_mask for decoder status
-        # kerple_bias_matrix = self.KerplePositionalEncoding(q.shape, k.shape)
-        # assert self.kerple_bias_matrix != None, f"The mask matrix is None"
-        #assert isinstance(kerple_bias_matrix, nn.Parameter), f"The mask matrix is not a trainable parameter. Shape: {kerple_bias_matrix.shape}, Datatype: {type(kerple_bias_matrix)}"
-        # Torch tensor multiplied with nn.Parameter will not create an nn.Parameter instance. 
-        # Torch nn.Parameter * nn.Parameter != nn.Parameter instance 
-        # So, we need to make it nn.Parameter to fulfill
-        # kerple_bias_matrix = nn.Parameter(kerple_bias_matrix)
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=False, attn_mask=self.kerple_bias_matrix(q.shape, k.shape)) # wow who knew flash attention was so easy to implement
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=False, attn_mask=self.alibi_mask(q.shape).to(x.device)) # wow who knew flash attention was so easy to implement
         y = y.transpose(1, 2).contiguous().view(B, T, self.n_head * (self.n_embed // self.n_head))
         # Output projection
         y = self.c_proj(y)
@@ -277,8 +213,10 @@ class GPT(nn.Module):
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, model block size is {self.config.block_size}"
 
         # IMP: Token and Positional Embeddings
+        pos = torch.arange(0, T, device=idx.device, dtype=torch.long)
+        pos_emb = self.transformer.wpe(pos)  #Positional Embeddings of shape (T, n_embed)
         tok_emb = self.transformer.wte(idx)  #Token Embeddings of shape (B, T, n_embed)
-        x = tok_emb 
+        x = tok_emb + pos_emb # broadcast along the batch dimension
 
         # Forward pass through each transformer block
         for block in self.transformer.h:
@@ -513,8 +451,8 @@ if master_process:
         print(f"  You are short by {shortfall:,} tokens.")
         print("  Consider either increasing the dataset size or reducing the model's parameters for optimal training.")
 
-    # log parameters to wandb
-    wandb.watch(model, log="all")
+# log parameters to wandb
+if master_process: wandb.watch(model, log="all")
 
 # Python interpreter is very slow. So, we need to compile the model
 # If compiled, in GPU, instead of traversing from HBM to cache for each single operation, 
@@ -524,7 +462,7 @@ model = torch.compile(model)
  
 # This is for ddp
 if ddp:
-    model = DDP(model, device_ids=[ddp_local_rank], output_device=ddp_local_rank, find_unused_parameters=True)
+    model = DDP(model, device_ids=[ddp_local_rank], output_device=ddp_local_rank)
 raw_model = model.module if ddp else model # Always contains the "raw" unwrapped model
 
 if master_process:
@@ -608,8 +546,8 @@ for epoch in range(max_steps):
     t0 = time.time()
     last_step = (epoch == max_steps - 1)
 
-    if ((epoch > 0 and epoch % 1000 == 0) or last_step):
-        ########## once in a while evaluate our validation loss
+    # once in a while evaluate our validation loss
+    if (epoch > 0 and epoch % 1000 == 0) or last_step:
         if master_process:  print("evaluating validation loss:")
         model.eval()
         val_loader.reset()
@@ -635,7 +573,8 @@ for epoch in range(max_steps):
                     wandb.save(f"model_{epoch}.pth")
                     print("Saved model artifact in torch and wandb")
 
-        #################### once in a while evaluate hellaswag
+    # once in a while evaluate hellaswag
+    if (epoch > 0 and epoch % 1000 == 0) or last_step:
         if master_process: print('evaluating hellaswag benchmark performance')
         num_correct_norm = 0
         num_total = 0
@@ -669,7 +608,8 @@ for epoch in range(max_steps):
             print(f"HellaSwag accuracy: {num_correct_norm}/{num_total}={hellaswag_accuracy:.4f}")
             if master_process: wandb.log({"hellaswag_accuracy": hellaswag_accuracy})
 
-        ############## once in a while generate from the model (except epoch 0, which is noise)
+    # once in a while generate from the model (except epoch 0, which is noise)
+    if (epoch > 0 and epoch % 1000 == 0) or last_step:
         model.eval()
         num_return_sequences = 4
         max_length = 32
@@ -706,8 +646,8 @@ for epoch in range(max_steps):
 
     # do one epoch of the optimization
     model.train()    
-
-
+    
+    
     optimizer.zero_grad()
     loss_accum = 0.0
     # This is for gradient accumulation
@@ -729,9 +669,6 @@ for epoch in range(max_steps):
         if ddp: # Sync the gradients only on the last epoch
             model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1) 
         loss.backward() # Do the backward pass and synchronize the gradients.
-      
-        for name, param in model.named_parameters():
-            if param.grad is None: print(f"Parameter {name} is unused.")
 
     # Accumulate loss across all GPUs if using DDP
     if ddp:
@@ -769,9 +706,6 @@ for epoch in range(max_steps):
             "avg_time_per_epoch": avg_time / (epoch + 1),
             "avg_tokens_per_sec": avg_tokens_per_sec / (epoch + 1)
         })
-
-        
-
 # %%
 if master_process:
     wandb.save('final_epoch_model.pth')
@@ -780,3 +714,55 @@ if master_process:
 # Destroy all processes if ddp is true
 if ddp: 
     destroy_process_group()
+
+
+# # %%
+# ########################################################################################
+# # Loading a pretrained model and generating text
+# # Generate text
+
+# model = GPT.from_pretrained('gpt2')
+# model.eval()
+# model.to(device)
+# compare(model, device)
+
+# max_length = 30 # Maximum length of the generated text
+# num_return_sequences = 5 # Number of different answers to generate
+
+# # Prefix tokens
+# from transformers import AutoTokenizer
+# tokenizer = AutoTokenizer.from_pretrained('gpt2')
+
+# tokens = tokenizer.encode("So, this morning I started studying for the interview in the lab. This was not", return_tensors='pt') # (8,)
+# # tokens = torch.tensor(tokens, dtype=torch.long)
+# # Repeat the tokens for the number of return sequences
+# tokens = tokens.repeat(num_return_sequences, 1)  # (5, 8)
+# x = tokens.to('cuda')
+
+# # Another way
+# # import tiktoken
+# # enc = tiktoken.get_encoding('gpt2')
+# # tokens = enc.encode("Hello, I'm a language model,")
+# # tokens = torch.tensor(tokens, dtype=torch. long) # (8. )
+# # tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # (5, 8)
+# # x = tokens.to('cuda')
+
+
+# # x - (B, T) - (Batch Size, Sequence Length)
+# torch.manual_seed(42)
+# torch.cuda.manual_seed(42)
+# while x.size(1) < max_length:
+#     model.eval()
+#     with torch.no_grad():
+#         logits = model(x)[0] #x, loss
+#         probs = F.softmax(logits[:, -1, :], dim=-1)
+#         topk_probs, topk_indices = torch.topk(probs, k=50, dim=-1)  #k=50 is GPT-2 default
+#         ix = torch.multinomial(topk_probs, num_samples=1)
+#         xcol = torch.gather(topk_indices, -1, ix)
+#         x = torch.cat((x, xcol), dim=1)
+
+# #print generated text
+# for i in range(num_return_sequences):
+#     print(tokenizer.decode(x[i, :].tolist()))
+#     # print(enc.decode(x[i, :].tolist()))
+# ########################################################################################
