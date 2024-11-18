@@ -524,7 +524,7 @@ model = torch.compile(model)
  
 # This is for ddp
 if ddp:
-    model = DDP(model, device_ids=[ddp_local_rank], output_device=ddp_local_rank, find_unused_parameters=True)
+    model = DDP(model, device_ids=[ddp_local_rank], output_device=ddp_local_rank)
 raw_model = model.module if ddp else model # Always contains the "raw" unwrapped model
 
 if master_process:
