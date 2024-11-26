@@ -21,11 +21,15 @@ import tiktoken
 import os
 import re
 
-path = os.path.abspath(__file__)
-pattern = r'c848k\d+'
-account = re.findall(pattern, path)[0]
-save_folder = f'/fs/class-projects/fall2024/cmsc848k/{account}/Alibi'
-if not os.path.isdir(save_folder): os.mkdir(save_folder)
+path = os.path.dirname(os.path.abspath(__file__))
+if path != '/fs/nexus-scratch/thilakcm/848k-project':
+    pattern = r'c848k\d+'
+    account = re.findall(pattern, path)[0]
+    save_folder = f'/fs/class-projects/fall2024/cmsc848k/{account}/Alibi'
+    if not os.path.isdir(save_folder): os.mkdir(save_folder)
+else: 
+    save_folder = '/fs/nexus-scratch/thilakcm'
+    if not os.path.isdir(save_folder): os.mkdir(save_folder)
 
 #%%
 # This is for distributed data parallelism
