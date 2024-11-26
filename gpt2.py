@@ -116,15 +116,14 @@ class CausalSelfAttention(nn.Module):
 
 
         # Attention mechanism
-        att = (q @ k.transpose(-2, -1)) * (1.0 / ((k.size(-1)) ** 0.5))
-        # Masked Attention
-        att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
-        att += alibi
-        att = F.softmax(att, dim=-1)
-        y = att @ v
+        # att = (q @ k.transpose(-2, -1)) * (1.0 / ((k.size(-1)) ** 0.5))
+        # # Masked Attention
+        # att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+        # att = F.softmax(att, dim=-1)
+        # y = att @ v
 
         # Flash Attention
-        # y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # wow who knew flash attention was so easy to implement
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # wow who knew flash attention was so easy to implement
         y = y.transpose(1, 2).contiguous().view(B, T, self.n_head * (self.n_embed // self.n_head))
         # Output projection
         y = self.c_proj(y)
@@ -452,7 +451,7 @@ if master_process: wandb.watch(model, log="all")
 # computation is done by traversing once  
 # This is for linux only
 model = torch.compile(model)
-
+ 
 # This is for ddp
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank], output_device=ddp_local_rank)
@@ -484,7 +483,7 @@ optimizer = raw_model.configure_optimizers(weight_decay=weight_decay, lr=6e-4, d
 
 # This is for gradient accumulation
 total_batch_size = 2**19 # 500K tokens
-B, T = 16, 1024
+B, T = 32, 1024
 
 #The below steps contain the number of steps to accumulate the gradients including multiple GPU steps too
 assert total_batch_size % (B * T * ddp_world_size) == 0, f"Batch size {total_batch_size} is not divisible by B * T = {B * T}"

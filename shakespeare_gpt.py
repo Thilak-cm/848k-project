@@ -71,6 +71,51 @@ def get_batch(split):
     y = torch.stack([data[i+1:i+block_size+1] for i in ix])
     return x, y
 
+class RotaryPositionEmbeddings(nn.Module):
+    '''Rotary Position Embeddings, as described in the RoPE paper'''
+    def __init__(self):
+        super().__init__()
+        self.base = 10_000
+        theta = torch.pow(self.base, -2 * torch.arange(0, n_emb // 2).float() / n_emb)
+        pos = torch.arange(block_size, dtype=theta.dtype, device=theta.device)
+
+        # Compute position * theta for sin and cos
+        idx_theta = pos.view(-1, 1) * theta.view(1, -1)
+
+        # Precompute sin and cos
+        cache = torch.stack((torch.cos(idx_theta), torch.sin(idx_theta)), dim=-1)  # Shape: [block_size, n_emb // 2, 2]
+
+        # Register the cache as a non-persistent buffer
+        self.register_buffer('cache', cache, persistent=False)
+
+    def forward(self, x):
+        '''
+        Args:
+            x (torch.Tensor): Input tensor of shape [b, seq_len, nh, hs].
+        
+        Returns:
+            torch.Tensor: Rotated tensor of the same shape as input.
+        '''
+        b, seq_len, nh, hs = x.shape  # Extract input dimensions
+
+        # Slice the RoPE cache to match the sequence length
+        rope_cache = self.cache[:seq_len].to(x.device)  # Shape: [seq_len, n_emb // 2, 2]
+
+        # Reshape input for rotation (split last dim into pairs)
+        x = x.reshape(b, seq_len, nh, hs // 2, 2)  # Shape: [b, seq_len, nh, hs // 2, 2]
+
+        # Add singleton dimensions to rope_cache for broadcasting
+        rope_cache = rope_cache.unsqueeze(0).unsqueeze(2)  # Shape: [1, seq_len, 1, h_s // 2, 2]
+
+        # Perform the RoPE rotation
+        rotated = torch.stack([
+            x[..., 0] * rope_cache[..., 0] - x[..., 1] * rope_cache[..., 1],  # cos * even - sin * odd
+            x[..., 1] * rope_cache[..., 0] + x[..., 0] * rope_cache[..., 1]   # sin * even + cos * odd
+        ], dim=-1)  # Shape: [b, seq_len, nh, hs // 2, 2]
+
+        # Flatten the last two dimensions back into the original shape
+        return rotated.flatten(-2).type_as(x)  # Shape: [b, seq_len, nh, hs]
+
 class AttentionHead(nn.Module):
     '''one head of self-attention'''
 
@@ -84,12 +129,24 @@ class AttentionHead(nn.Module):
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
         # using register buffer ensures that tril is not initialized as a param, so it won't be optimized during training
         self.dropout = nn.Dropout(dropout)
+        self.rope = RotaryPositionEmbeddings()
 
     def forward(self, x):
         B, T, C = x.shape
+        print(f"Shape of x: {x.shape}")
         k = self.key(x) # BxTxC
         q = self.query(x) # BxTxC
         v = self.value(x) # BxTxC
+        print(f"Shape of k: {k.shape}")
+        
+        head_size = C // n_heads
+        k = k.view(B, T, n_heads, head_size // n_heads) # B x T x n_h x h_s
+        q = q.view(B, T, n_heads, head_size // n_heads) # B x T x n_h x h_s
+        print('am i even getting here')
+        # apply rotary position embeddings
+        k = self.rope(k)
+        q = self.rope(q)
+
         # compute attention scores
         # could potentially be optimized by using einsum? TODO: understand how
         # could potentially use lora's code to optimize this
@@ -118,6 +175,7 @@ class MultiHeadAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
     
     def forward(self, x):
+        print('tacos -2')
         out = torch.cat([h(x) for h in self.heads], dim=-1) # BxTxC
         out = self.projection(out)
         return self.dropout(out)
@@ -136,6 +194,7 @@ class FeedForwardNN(nn.Module):
         )
     
     def forward(self, x):
+        print('tacos 2')
         return self.net(x)
 
 class Block(nn.Module):
@@ -150,11 +209,14 @@ class Block(nn.Module):
         self.ln2 = nn.LayerNorm(n_emb)
 
     def forward(self, x):
+        print('tacos -1')
+        print(f"Shape of x in Block: {x.shape}")
         x = x + self.sa(self.ln1(x)) # residual connection # TODO: test using layer norm after sa and ffn as in original transformer paper 
         # and understand why there was an improvement in the new method
+        print('tacos 0')
         x = x + self.ffn(self.ln2(x)) # residual connection (damn that was a very easy change to make)
+        print('tacos 1')
         return x
-
 
 class NanoGPT(nn.Module):
     def __init__(self):
@@ -171,8 +233,8 @@ class NanoGPT(nn.Module):
         B, T = idx.shape
         # idx and targets are both of shape (batch_size, block_size) aka (B, T)
         token_emb = self.token_embedding_table(idx) # Batch x time x channel (here channel is now n_emb)
-        pos_emb = self.positional_embedding_table(torch.arange(T)) # time x channel
-        x = token_emb + pos_emb  # add positional embedding to token embedding
+        # pos_emb = self.positional_embedding_table(torch.arange(T)) # time x channel
+        x = token_emb # + pos_emb  # add positional embedding to token embedding
         x = self.blocks(x)
         logits = self.lm_head(x) # B, T, vocab size
 
@@ -216,7 +278,7 @@ print(f"Total number of tokens in the dataset: {total_tokens:,}")
 
 # Chinchilla Scaling Law suggests that the optimal number of tokens should be about 2 times the number of parameters.
 # According to Chinchilla Law, we need at least 2 * total_params tokens
-required_tokens = total_params * 2
+required_tokens = total_params * 20
 print(f"According to Chinchilla Scaling Law, you need at least {required_tokens:,} tokens to train this model effectively.")
 
 # Check if the dataset meets the recommended number of tokens
@@ -242,6 +304,7 @@ for iter in tqdm(range(epochs), desc="Training Epochs"):
     # Training phase
     model.train()  # Set model to training mode
     xb, yb = get_batch('train')
+    print(f"xb shape: {xb.shape}")
     logits, train_loss = model(xb, yb)
 
     # Zero gradients, backward pass, and optimizer step
