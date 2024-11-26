@@ -18,8 +18,14 @@ import wandb
 import numpy as np
 from hellaswag import render_example, iterate_examples
 import tiktoken
-import torch._dynamo
-torch._dynamo.config.suppress_errors = True
+import os
+import re
+
+path = os.path.abspath(__file__)
+pattern = r'c848k\d+'
+account = re.findall(pattern, path)[0]
+save_folder = f'/fs/class-projects/fall2024/cmsc848k/{account}/Alibi'
+if not os.path.isdir(save_folder): os.mkdir(save_folder)
 
 #%%
 # This is for distributed data parallelism
@@ -62,55 +68,7 @@ if master_process:
     # Initialize wandb to this project
     wandb.init(project="GPT 2 848K Nexus Cluster")
 
-    wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Kerple Attention", "Gelu", "Kerple Log Positional Encoding", "training"]
-
-class ClampedKerpleParameterModule(nn.Module):
-    def __init__(self, num_heads, scale=1, min_value=1e-2):
-        super().__init__()
-        self.param = nn.Parameter(torch.rand(num_heads) * scale)
-        self.min_value = min_value
-
-    def forward(self, x):
-        clamped_param = torch.clamp(self.param, min=self.min_value)
-        return clamped_param.view(-1, 1, 1) * x
-
-class KerplePositionalEncoding(nn.Module):
-    def __init__(self, num_heads, block_size=1024, scale_r1=1, scale_r2=2, min_value=1e-2):
-        super().__init__()
-        self.r1 = ClampedKerpleParameterModule(num_heads, scale=scale_r1, min_value=min_value)
-        self.r2 = ClampedKerpleParameterModule(num_heads, scale=scale_r2, min_value=min_value)
-        self.n_head = num_heads
-        self.block_size = block_size
-
-        # Precompute the distance matrix |m - n| and apply scaling
-        self.distance_matrix = torch.arange(self.block_size).view(-1, 1) - torch.arange(self.block_size).view(1, -1)
-        self.distance_matrix = self.distance_matrix.abs().float().to(device)  # Shape: (block_size, block_size)
-        self.distance_matrix = self.distance_matrix.repeat(self.n_head, 1, 1)
-
-        # Mask out the upper triangular part of the distance matrix
-        # mask = torch.ones(self.block_size, self.block_size).tril(diagonal=0).repeat(self.n_head, 1, 1) 
-        # self.distance_matrix = self.distance_matrix.masked_fill(mask.logical_not().to(device), float('-inf'))  # Shape: (block_size, block_size)
-
-    def forward(self, q_shape):
-        # Code: https://github.com/chijames/KERPLE/blob/main/megatron/mpu/layers.py#L192
-        # Precompute the distance matrix |m - n| and apply scaling
-        applied_distance_matrix = self.distance_matrix
-        if q_shape != self.block_size:
-            pos = torch.arange(q_shape[2]).view(-1, 1) - torch.arange(q_shape[2]).view(1, -1)
-            distance_matrix = pos.abs().float().to(device)  # Shape: (block_size, block_size)
-            distance_matrix = distance_matrix.repeat(self.n_head, 1, 1)
-            applied_distance_matrix = distance_matrix
-        # The formula for Kerple is -r2 * log(1 + |m - n| * r1) where r1 and r2 > 0
-        # distance_matrix = self.r1(distance_matrix.repeat(self.n_head, 1, 1))  # Shape: (n_head, block_size, block_size)
-        distance_matrix = self.r1(applied_distance_matrix)  # Shape: (n_head, block_size, block_size)
-        distance_matrix = -self.r2(1 + torch.log(1 + distance_matrix))  # Shape: (block_size, block_size)
-
-        # Mask out the upper triangular part of the distance matrix
-        mask = torch.ones(q_shape[2], q_shape[2]).tril(diagonal=0).repeat(self.n_head, 1, 1)
-        # assert mask.shape == distance_matrix.shape, f"Mask shape is {mask.shape} whereas distance_matrix shape is {distance_matrix.shape}"
-        distance_matrix = distance_matrix.masked_fill(mask.logical_not().to(device), float('-inf'))  # Shape: (block_size, block_size)
-
-        return distance_matrix
+    wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Flash Attention", "Gelu", "ALiBi Positional Encoding", "training"]
 
 # GPT-2 is a decoder only transformer model
 #This is for MLP block
@@ -130,7 +88,6 @@ class MLP(nn.Module):
         x = self.c_proj(x)
         return x
 
-
 # This is for self attention block
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
@@ -149,17 +106,17 @@ class CausalSelfAttention(nn.Module):
         # Regularization
         self.n_head = config.n_head
         self.n_embed = config.n_embed
-        self.block_size = config.block_size
-
-
-        # The formula for Kerple is -r2 * log(1 + |m - n| * r1) where r1 and r2 > 0
-        # self.r1 = torch.nn.Parameter(torch.rand(self.n_head))
-        # self.r2 = torch.nn.Parameter(torch.rand(self.n_head))
-        # self.r1 = ClampedKerpleParameterModule(self.n_head, scale=1, min_value=1e-2).to(device)
-        # self.r2 = ClampedKerpleParameterModule(self.n_head, scale=2, min_value=1e-2).to(device)
-        self.kerple_bias_matrix = KerplePositionalEncoding(self.n_head, self.block_size)
         # not really a bias but a mask, but following OpenAI naming convention
         self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size)).view(1, 1, config.block_size, config.block_size)) 
+
+    def alibi_mask(self, q_shape):
+        # To create an alibi_mask, q* k_T + m * [a - b] where m = 2**(-8/head_number). 
+        # [a - b] is a lower triangular matrix with all negative values.
+        # Why q_shape[2]? Because it contains sequence length 
+        pos = - torch.arange(q_shape[2]).view(-1, 1) + torch.arange(q_shape[2]).view(1, -1)
+        pos = pos.float().masked_fill(pos > 0, float('-inf'))  # Shape: (block_size, block_size)
+        head_m_value = torch.tensor([2.0**(-8/i) for i in torch.linspace(1, 8, self.n_head)])
+        return head_m_value.view(-1, 1, 1) * pos
 
     def forward(self, x):
         B, T, C = x.size() # Batch size, Sequence Length, Embedding dimensionality (n_embed)
@@ -182,18 +139,7 @@ class CausalSelfAttention(nn.Module):
         # y = att @ v
 
         # Flash Attention
-        # kerple_bias_matrix = self.KerplePositionalEncoding(q.shape, k.shape)
-        # Torch tensor multiplied with nn.Parameter will not create an nn.Parameter instance. 
-        # Torch nn.Parameter * nn.Parameter != nn.Parameter instance 
-        # So, we need to make it nn.Parameter to fulfill
-        # kerple_bias_matrix = nn.Parameter(kerple_bias_matrix)
-        
-        # y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # wow who knew flash attention was so easy to implement
-        #is_causal = True implies that the attention mechanism uses only the past tokens (decoder style)
-        #You cannot add is_causal=True and attn_mask at the same time as there is an assertion error 
-        #if is_causal: assert attn_mask is None. So, we use only the lower triangular matrix from the attn_mask for decoder status
-        # y = F.scaled_dot_product_attention(q, k, v, is_causal=False, attn_mask=self.kerple_bias_matrix(q.shape, k.shape)) # wow who knew flash attention was so easy to implement
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=False, attn_mask=self.kerple_bias_matrix(q.shape)) # wow who knew flash attention was so easy to implement
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=False, attn_mask=self.alibi_mask(q.shape).to(x.device)) # wow who knew flash attention was so easy to implement
         y = y.transpose(1, 2).contiguous().view(B, T, self.n_head * (self.n_embed // self.n_head))
         # Output projection
         y = self.c_proj(y)
@@ -605,8 +551,8 @@ for epoch in range(max_steps):
     t0 = time.time()
     last_step = (epoch == max_steps - 1)
 
-    if False and ((epoch > 0 and epoch % 20 == 0) or last_step):
-        ########## once in a while evaluate our validation loss
+    # once in a while evaluate our validation loss
+    if ((epoch > 0 and epoch % 1000 == 0) or last_step) and False:
         if master_process:  print("evaluating validation loss:")
         model.eval()
         val_loader.reset()
@@ -624,8 +570,7 @@ for epoch in range(max_steps):
             dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
         if master_process:
             print(f"validation loss: {val_loss_accum.item():.4f}")
-            # if epoch > 0 and (epoch % 5000 == 0 or last_step):
-            if epoch > 0 and (epoch % 1000 == 0 or last_step):
+            if epoch > 0 and (epoch % 5000 == 0 or last_step):
                 if master_process: 
                     wandb.log({"val_loss": val_loss_accum.item()})
                     # you might also want to add optimizer.state_dict() and
@@ -633,46 +578,42 @@ for epoch in range(max_steps):
                     wandb.save(f"model_{epoch}.pth")
                     print("Saved model artifact in torch and wandb")
 
-        #################### once in a while evaluate hellaswag
-        # if master_process: print('evaluating hellaswag benchmark performance')
-        # num_correct_norm = 0
-        # num_total = 0
-        # for i, example in enumerate(iterate_examples("val")):
-        #     # only process examples where epoch % ddp_world_size == ddp_rank
-        #     if i % ddp_world_size != ddp_rank:
-        #         continue
-        #     # render the example into tokens and labels
-        #     _, tokens, mask, label = render_example(example)
-        #     tokens = tokens.to(device)
-        #     mask = mask.to(device)
-        #     # get the logits
-        #     with torch.no_grad():
-        #         with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-        #             logits, loss = model(tokens)
-        #         pred_norm = get_most_likely_row(tokens, mask, logits)
-        #     num_total += 1
-        #     num_correct_norm += int(pred_norm == label)
-        
-        # # reduce the stats across all processes
-        # if ddp:
-        #     num_total = torch.tensor(num_total, dtype=torch.long, device=device)
-        #     num_correct_norm = torch.tensor(num_correct_norm, dtype=torch.long, device=device)
-        #     dist.all_reduce(num_total, op=dist.ReduceOp.SUM)
-        #     dist.all_reduce(num_correct_norm, op=dist.ReduceOp.SUM)
-        #     num_total = num_total.item()
-        #     num_correct_norm = num_correct_norm.item()
-        # acc_norm = num_correct_norm / num_total
-        # if master_process:
-        #     # log the accuracy
-        #     hellaswag_accuracy = acc_norm
-        #     print(f"HellaSwag accuracy: {num_correct_norm}/{num_total}={hellaswag_accuracy:.4f}")
-        #     if master_process: wandb.log({"hellaswag_accuracy": hellaswag_accuracy})
+        ############# once in a while evaluate hellaswag
+        if master_process: print('evaluating hellaswag benchmark performance')
+        num_correct_norm = 0
+        num_total = 0
+        for i, example in enumerate(iterate_examples("val")):
+            # only process examples where epoch % ddp_world_size == ddp_rank
+            if i % ddp_world_size != ddp_rank:
+                continue
+            # render the example into tokens and labels
+            _, tokens, mask, label = render_example(example)
+            tokens = tokens.to(device)
+            mask = mask.to(device)
+            # get the logits
+            with torch.no_grad():
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                    logits, loss = model(tokens)
+                pred_norm = get_most_likely_row(tokens, mask, logits)
+            num_total += 1
+            num_correct_norm += int(pred_norm == label)
+        # reduce the stats across all processes
+        if ddp:
+            num_total = torch.tensor(num_total, dtype=torch.long, device=device)
+            num_correct_norm = torch.tensor(num_correct_norm, dtype=torch.long, device=device)
+            dist.all_reduce(num_total, op=dist.ReduceOp.SUM)
+            dist.all_reduce(num_correct_norm, op=dist.ReduceOp.SUM)
+            num_total = num_total.item()
+            num_correct_norm = num_correct_norm.item()
+        acc_norm = num_correct_norm / num_total
+        if master_process:
+            # log the accuracy
+            hellaswag_accuracy = acc_norm
+            print(f"HellaSwag accuracy: {num_correct_norm}/{num_total}={hellaswag_accuracy:.4f}")
+            if master_process: wandb.log({"hellaswag_accuracy": hellaswag_accuracy})
 
-        # # To remove hellaswag
-        # tokens = mask = None
-        # num_total = num_correct_norm = None
         ############## once in a while generate from the model (except epoch 0, which is noise)
-        # model.eval()
+        model.eval()
         num_return_sequences = 4
         max_length = 32
         tokens = enc.encode("Hello, I'm a language model,")
@@ -705,14 +646,9 @@ for epoch in range(max_steps):
             tokens = xgen[i, :max_length].tolist()
             decoded = enc.decode(tokens)
             print(f"rank {ddp_rank} sample {i}: {decoded}")
-        
-        # To remove generated 
-        tokens = xgen = None
-        torch.cuda.empty_cache()
+
     # do one epoch of the optimization
     model.train()    
-
-
     optimizer.zero_grad()
     loss_accum = 0.0
     # This is for gradient accumulation
@@ -734,9 +670,6 @@ for epoch in range(max_steps):
         if ddp: # Sync the gradients only on the last epoch
             model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1) 
         loss.backward() # Do the backward pass and synchronize the gradients.
-      
-        for name, param in model.named_parameters():
-            if param.grad is None: print(f"Parameter {name} is unused.")
 
     # Accumulate loss across all GPUs if using DDP
     if ddp:
@@ -781,12 +714,12 @@ for epoch in range(max_steps):
             if master_process: 
                 # you might also want to add optimizer.state_dict() and
                 # rng seeds etc., if you wanted to more exactly resume training
-                torch.save(raw_model.state_dict(), f"/fs/class-projects/fall2024/cmsc848k/c848k017/Kerple/model_{epoch}.pth")
+                torch.save(raw_model.state_dict(), f"{save_folder}/model_{epoch}.pth")
                 print("Saved model artifact in torch and wandb")
 
 # %%
 if master_process:
-    torch.save(raw_model.state_dict(), '/fs/class-projects/fall2024/cmsc848k/c848k017/Kerple/final_epoch_model.pth')
+    torch.save(raw_model.state_dict(), f'{save_folder}/final_epoch_model.pth')
     print(f"Average time: {avg_time / max_steps * 1000}ms, Average tokens/sec: {avg_tokens_per_sec / max_steps}")
 
 # Destroy all processes if ddp is true
