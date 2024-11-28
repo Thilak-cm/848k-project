@@ -19,6 +19,8 @@ import numpy as np
 from hellaswag import render_example, iterate_examples
 import tiktoken
 import os
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
 import re
 
 path = os.path.dirname(os.path.abspath(__file__))
@@ -152,7 +154,7 @@ class CausalSelfAttention(nn.Module):
         # y = att @ v
         alibi_attn_mask = self.alibi_attn_mask
         if q.shape[2] != self.block_size:
-            alibi_attn_mask = self.alibi_mask(q.shape[2]).to(device)
+            alibi_attn_mask = self.alibi_mask(q.shape).to(device)
         # Flash Attention
         y = F.scaled_dot_product_attention(q, k, v, is_causal=False, attn_mask=alibi_attn_mask) # wow who knew flash attention was so easy to implement
         y = y.transpose(1, 2).contiguous().view(B, T, self.n_head * (self.n_embed // self.n_head))
