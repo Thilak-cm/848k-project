@@ -18,10 +18,23 @@ import wandb
 import numpy as np
 from hellaswag import render_example, iterate_examples
 import tiktoken
+import re
+
+path = os.path.dirname(os.path.abspath(__file__))
+
+if path != '/fs/nexus-scratch/thilakcm/848k-project':
+    pattern = r'c848k\d+'
+    account = re.findall(pattern, path)[0]
+    save_folder = f'/fs/class-projects/fall2024/cmsc848k/{account}/FIRE'
+    os.makedirs(save_folder, exist_ok=True)
+else:
+    save_folder = '/fs/nexus-scratch/thilakcm/FIRE'
+    os.makedirs(save_folder, exist_ok=True)
 
 #%%
 # This is for distributed data parallelism
 ddp = int(os.environ.get('RANK', -1)) != -1
+
 
 # If ddp is true, then we need to initialize the process group
 if ddp:  # For legends
@@ -524,7 +537,7 @@ if master_process:
 max_lr = 6e-4
 min_lr = max_lr / 10
 warmup_steps = 715
-max_steps = 5 #19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+max_steps = 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
 # 20 is used for testing purposes
 
 # cosine annealing learning rate scheduler
@@ -546,7 +559,7 @@ optimizer = raw_model.configure_optimizers(weight_decay=weight_decay, lr=6e-4, d
 
 # This is for gradient accumulation
 total_batch_size = 2**19 # 500K tokens
-B, T = 8, 1024
+B, T = 32, 1024
 
 #The below steps contain the number of steps to accumulate the gradients including multiple GPU steps too
 assert total_batch_size % (B * T * ddp_world_size) == 0, f"Batch size {total_batch_size} is not divisible by B * T = {B * T}"
@@ -598,7 +611,7 @@ for epoch in range(max_steps):
     last_step = (epoch == max_steps - 1)
 
     ########################## once in a while evaluate our validation loss
-    if ((epoch > 0 and epoch % 1000 == 0) or last_step):
+    if ((epoch > 0 and epoch % 1000 == 0) or last_step) and False:
         if master_process:  print("evaluating validation loss:")
         model.eval()
         val_loader.reset()
@@ -756,15 +769,15 @@ for epoch in range(max_steps):
             "avg_time_per_epoch": avg_time / (epoch + 1),
             "avg_tokens_per_sec": avg_tokens_per_sec / (epoch + 1)
         })
-        if epoch >= 0 and (epoch % 1000 == 0 or last_step):
+        if epoch > 0 and (epoch % 1000 == 0 or last_step):
             if master_process: 
                 # you might also want to add optimizer.state_dict() and
                 # rng seeds etc., if you wanted to more exactly resume training
-                torch.save(raw_model.state_dict(), f"/fs/class-projects/fall2024/cmsc848k/c848k063/FIRE/model_{epoch}.pth")
+                torch.save(raw_model.state_dict(), f"{save_folder}/model_{epoch}.pth")
                 print("Saved model artifact in torch and wandb")
 # %%
 if master_process:
-    torch.save(raw_model.state_dict(), '/fs/class-projects/fall2024/cmsc848k/c848k063/FIRE/final_epoch_model.pth')
+    torch.save(raw_model.state_dict(), f'{save_folder}/final_epoch_model.pth')
     print(f"Average time: {avg_time / max_steps * 1000}ms, Average tokens/sec: {avg_tokens_per_sec / max_steps}")
 
 # Destroy all processes if ddp is true
