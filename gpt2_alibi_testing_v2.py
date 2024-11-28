@@ -18,8 +18,6 @@ import wandb
 import numpy as np
 from hellaswag import render_example, iterate_examples
 import tiktoken
-import torch._dynamo
-torch._dynamo.config.suppress_errors = True
 import os
 import re
 
@@ -28,59 +26,54 @@ path = os.path.dirname(os.path.abspath(__file__))
 if path != '/fs/nexus-scratch/thilakcm/848k-project':
     pattern = r'c848k\d+'
     account = re.findall(pattern, path)[0]
-    save_folder = f'/fs/class-projects/fall2024/cmsc848k/{account}/Kerple'
+    save_folder = f'/fs/class-projects/fall2024/cmsc848k/{account}/Alibi'
     os.makedirs(save_folder, exist_ok=True)
 else:
-    save_folder = '/fs/nexus-scratch/thilakcm/Kerple'
+    save_folder = '/fs/nexus-scratch/thilakcm/Alibi'
     os.makedirs(save_folder, exist_ok=True)
 
-class ClampedKerpleParameterModule(nn.Module):
-    def __init__(self, num_heads, scale=1, min_value=1e-2):
-        super().__init__()
-        self.param = nn.Parameter(torch.rand(num_heads) * scale)
-        self.min_value = min_value
+#%%
+# This is for distributed data parallelism
+ddp = int(os.environ.get('RANK', -1)) != -1
 
-    def forward(self, x):
-        clamped_param = torch.clamp(self.param, min=self.min_value)
-        return clamped_param.view(-1, 1, 1) * x
+# If ddp is true, then we need to initialize the process group
+if ddp:  # For legends
+    assert torch.cuda.is_available()
+    init_process_group(backend='nccl')
+    ddp_rank = int(os.environ['RANK'])  # GPU 0 has rank 0, GPU 1 has rank 1, etc.
+    ddp_local_rank = int(os.environ['LOCAL_RANK']) # Local rank within the node
+    ddp_world_size = int(os.environ['WORLD_SIZE']) # Number of GPUs
 
-class KerplePositionalEncoding(nn.Module):
-    def __init__(self, num_heads, block_size=1024, scale_r1=1, scale_r2=2, min_value=1e-2):
-        super().__init__()
-        self.r1 = ClampedKerpleParameterModule(num_heads, scale=scale_r1, min_value=min_value)
-        self.r2 = ClampedKerpleParameterModule(num_heads, scale=scale_r2, min_value=min_value)
-        self.n_head = num_heads
-        self.block_size = block_size
+    device = f'cuda:{ddp_local_rank}'
+    torch.cuda.set_device(device)   
+    master_process = ddp_rank == 0  
+else:
+    ddp_rank = 0
+    ddp_local_rank = 0
+    ddp_world_size = 1
+    master_process = True
 
-        # Precompute the distance matrix |m - n| and apply scaling
-        self.distance_matrix = torch.arange(self.block_size).view(-1, 1) - torch.arange(self.block_size).view(1, -1)
-        self.distance_matrix = self.distance_matrix.abs().float().to(device)  # Shape: (block_size, block_size)
-        self.distance_matrix = self.distance_matrix.repeat(self.n_head, 1, 1)
+    device = 'cpu' # For noobs
+    if torch.cuda.is_available(): # For adults
+        device = 'cuda'
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available(): # For kids
+        device = "mps"
+    print(f"using device: {device}" )
 
-        # Mask out the upper triangular part of the distance matrix
-        # mask = torch.ones(self.block_size, self.block_size).tril(diagonal=0).repeat(self.n_head, 1, 1) 
-        # self.distance_matrix = self.distance_matrix.masked_fill(mask.logical_not().to(device), float('-inf'))  # Shape: (block_size, block_size)
+# pytorch can be serious about device vs device type so we need to set it correctly
+# TODO: understand the difference between device and device type
+device_type = "cuda" if device.startswith("cuda") else "cpu"
 
-    def forward(self, q_shape):
-        # Code: https://github.com/chijames/KERPLE/blob/main/megatron/mpu/layers.py#L192
-        # Precompute the distance matrix |m - n| and apply scaling
-        applied_distance_matrix = self.distance_matrix
-        if q_shape != self.block_size:
-            pos = torch.arange(q_shape[2]).view(-1, 1) - torch.arange(q_shape[2]).view(1, -1)
-            distance_matrix = pos.abs().float().to(device)  # Shape: (block_size, block_size)
-            distance_matrix = distance_matrix.repeat(self.n_head, 1, 1)
-            applied_distance_matrix = distance_matrix
-        # The formula for Kerple is -r2 * log(1 + |m - n| * r1) where r1 and r2 > 0
-        # distance_matrix = self.r1(distance_matrix.repeat(self.n_head, 1, 1))  # Shape: (n_head, block_size, block_size)
-        distance_matrix = self.r1(applied_distance_matrix)  # Shape: (n_head, block_size, block_size)
-        distance_matrix = -self.r2(1 + torch.log(1 + distance_matrix))  # Shape: (block_size, block_size)
+# This is for reproducibility
+torch.manual_seed(1337)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(1337)
 
-        # Mask out the upper triangular part of the distance matrix
-        mask = torch.ones(q_shape[2], q_shape[2]).tril(diagonal=0).repeat(self.n_head, 1, 1)
-        # assert mask.shape == distance_matrix.shape, f"Mask shape is {mask.shape} whereas distance_matrix shape is {distance_matrix.shape}"
-        distance_matrix = distance_matrix.masked_fill(mask.logical_not().to(device), float('-inf'))  # Shape: (block_size, block_size)
+if master_process:
+    # Initialize wandb to this project
+    wandb.init(project="GPT 2 848K Nexus Cluster")
 
-        return distance_matrix
+    wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Flash Attention", "Gelu", "ALiBi Positional Encoding", "testing"]
 
 # GPT-2 is a decoder only transformer model
 #This is for MLP block
@@ -119,17 +112,24 @@ class CausalSelfAttention(nn.Module):
         # Regularization
         self.n_head = config.n_head
         self.n_embed = config.n_embed
-        self.block_size = config.block_size
-
-
-        # The formula for Kerple is -r2 * log(1 + |m - n| * r1) where r1 and r2 > 0
-        # self.r1 = torch.nn.Parameter(torch.rand(self.n_head))
-        # self.r2 = torch.nn.Parameter(torch.rand(self.n_head))
-        # self.r1 = ClampedKerpleParameterModule(self.n_head, scale=1, min_value=1e-2).to(device)
-        # self.r2 = ClampedKerpleParameterModule(self.n_head, scale=2, min_value=1e-2).to(device)
-        self.kerple_bias_matrix = KerplePositionalEncoding(self.n_head, self.block_size)
         # not really a bias but a mask, but following OpenAI naming convention
         self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size)).view(1, 1, config.block_size, config.block_size)) 
+
+        self.block_size = config.block_size
+        pos = - torch.arange(config.block_size).view(-1, 1) + torch.arange(config.block_size).view(1, -1)
+        pos = pos.float().masked_fill(pos > 0, float('-inf'))  # Shape: (block_size, block_size)
+        head_m_value = torch.tensor([2.0**(-8/i) for i in torch.linspace(1, 8, self.n_head)])
+        self.alibi_attn_mask = head_m_value.view(-1, 1, 1) * pos
+        self.alibi_attn_mask = self.alibi_attn_mask.to(device)
+
+    def alibi_mask(self, q_shape):
+        # To create an alibi_mask, q* k_T + m * [a - b] where m = 2**(-8/head_number). 
+        # [a - b] is a lower triangular matrix with all negative values.
+        # Why q_shape[2]? Because it contains sequence length 
+        pos = - torch.arange(q_shape[2]).view(-1, 1) + torch.arange(q_shape[2]).view(1, -1)
+        pos = pos.float().masked_fill(pos > 0, float('-inf'))  # Shape: (block_size, block_size)
+        head_m_value = torch.tensor([2.0**(-8/i) for i in torch.linspace(1, 8, self.n_head)])
+        return head_m_value.view(-1, 1, 1) * pos
 
     def forward(self, x):
         B, T, C = x.size() # Batch size, Sequence Length, Embedding dimensionality (n_embed)
@@ -150,20 +150,11 @@ class CausalSelfAttention(nn.Module):
         # att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
         # att = F.softmax(att, dim=-1)
         # y = att @ v
-
+        alibi_attn_mask = self.alibi_attn_mask
+        if q.shape[2] != self.block_size:
+            alibi_attn_mask = self.alibi_mask(q.shape[2]).to(device)
         # Flash Attention
-        # kerple_bias_matrix = self.KerplePositionalEncoding(q.shape, k.shape)
-        # Torch tensor multiplied with nn.Parameter will not create an nn.Parameter instance. 
-        # Torch nn.Parameter * nn.Parameter != nn.Parameter instance 
-        # So, we need to make it nn.Parameter to fulfill
-        # kerple_bias_matrix = nn.Parameter(kerple_bias_matrix)
-        
-        # y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # wow who knew flash attention was so easy to implement
-        #is_causal = True implies that the attention mechanism uses only the past tokens (decoder style)
-        #You cannot add is_causal=True and attn_mask at the same time as there is an assertion error 
-        #if is_causal: assert attn_mask is None. So, we use only the lower triangular matrix from the attn_mask for decoder status
-        # y = F.scaled_dot_product_attention(q, k, v, is_causal=False, attn_mask=self.kerple_bias_matrix(q.shape, k.shape)) # wow who knew flash attention was so easy to implement
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=False, attn_mask=self.kerple_bias_matrix(q.shape)) # wow who knew flash attention was so easy to implement
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=False, attn_mask=alibi_attn_mask) # wow who knew flash attention was so easy to implement
         y = y.transpose(1, 2).contiguous().view(B, T, self.n_head * (self.n_embed // self.n_head))
         # Output projection
         y = self.c_proj(y)
@@ -397,58 +388,6 @@ class DataLoaderLite:
             self.tokens = load_tokens(self.shards[self.current_shard])
             self.current_position = B * T * self.process_rank
         return x,y
-
-#%%
-# This is for distributed data parallelism
-ddp = int(os.environ.get('RANK', -1)) != -1
-
-# If ddp is true, then we need to initialize the process group
-if ddp:  # For legends
-    assert torch.cuda.is_available()
-    init_process_group(backend='nccl')
-    ddp_rank = int(os.environ['RANK'])  # GPU 0 has rank 0, GPU 1 has rank 1, etc.
-    ddp_local_rank = int(os.environ['LOCAL_RANK']) # Local rank within the node
-    ddp_world_size = int(os.environ['WORLD_SIZE']) # Number of GPUs
-
-    device = f'cuda:{ddp_local_rank}'
-    torch.cuda.set_device(device)   
-    master_process = ddp_rank == 0  
-else:
-    ddp_rank = 0
-    ddp_local_rank = 0
-    ddp_world_size = 1
-    master_process = True
-
-    device = 'cpu' # For noobs
-    if torch.cuda.is_available(): # For adults
-        device = 'cuda'
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available(): # For kids
-        device = "mps"
-    print(f"using device: {device}" )
-
-# pytorch can be serious about device vs device type so we need to set it correctly
-# TODO: understand the difference between device and device type
-device_type = "cuda" if device.startswith("cuda") else "cpu"
-
-# This is for reproducibility
-torch.manual_seed(1337)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed(1337)
-
-if master_process:
-    # Initialize wandb to this project
-    wandb.init(project="GPT 2 848K Nexus Cluster")
-
-    wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Kerple Attention", "Gelu", "Kerple Log Positional Encoding", "Testing"]
-
-
-def load_tokens(filename):
-    try: npt = np.load(filename, allow_pickle=True)
-    except: npt = np.fromfile(filename, dtype=np.uint16)  # Replace dtype as needed
-
-    ptt = torch.tensor(npt, dtype=torch.long)
-    return ptt 
-
 
 # -----------------------------------------------------------------------------
 # helper function for HellaSwag eval
