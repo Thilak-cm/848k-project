@@ -73,19 +73,34 @@ def get_batch(split):
 
 class RotaryPositionEmbeddings(nn.Module):
     '''Rotary Position Embeddings, as described in the RoPE paper'''
-    def __init__(self):
+    def __init__(self, base=10_000, n_emb=n_emb, max_seq_len=block_size):
         super().__init__()
-        self.base = 10_000
-        theta = torch.pow(self.base, -2 * torch.arange(0, n_emb // 2).float() / n_emb)
-        pos = torch.arange(block_size, dtype=theta.dtype, device=theta.device)
+        self.base = base
+        self.dim = n_emb
+        self.max_seq_len = max_seq_len
+        self.rope_init()
+    
+    def rope_init(self):
+        '''
+        Initialize the RoPE cache with sin and cos values for each position.
+        '''
+        # Compute thetas for sin and cos
+        theta = torch.pow(self.base, -2 * torch.arange(0, self.dim // 2).float() / self.dim)
+        self.register_buffer('theta', theta, persistent=False)
+        self.build_rope_cache()
+    
+    def build_rope_cache(self):
+        '''
+        Build the RoPE cache for the given block size.
+        '''
+        seq_idx = torch.arange(self.max_seq_len, dtype=self.theta.dtype, device=self.theta.device)
 
         # Compute position * theta for sin and cos
-        idx_theta = pos.view(-1, 1) * theta.view(1, -1)
+        # idx_theta = seq_idx.view(-1, 1) * self.theta.view(1, -1) # same functionality as einsum
+        idx_theta = torch.einsum("i, j -> ij", seq_idx, self.theta).float()
 
         # Precompute sin and cos
-        cache = torch.stack((torch.cos(idx_theta), torch.sin(idx_theta)), dim=-1)  # Shape: [block_size, n_emb // 2, 2]
-
-        # Register the cache as a non-persistent buffer
+        cache = torch.stack([torch.cos(idx_theta), torch.sin(idx_theta)], dim=-1)  # Shape: [block_size, n_emb // 2, 2]
         self.register_buffer('cache', cache, persistent=False)
 
     def forward(self, x):
@@ -97,16 +112,21 @@ class RotaryPositionEmbeddings(nn.Module):
             torch.Tensor: Rotated tensor of the same shape as input.
         '''
         b, seq_len, nh, hs = x.shape  # Extract input dimensions
+        # TODO: if n_emb is 32, nh is 2, hs should be 16 (n_emb // nh) but it is 8, why?
+        print(f"shape of x before reshaping in RoPE: {x.shape}")
 
         # Slice the RoPE cache to match the sequence length
+        print(f"shape of cache before slicing in RoPE: {self.cache.shape}")
         rope_cache = self.cache[:seq_len].to(x.device)  # Shape: [seq_len, n_emb // 2, 2]
-
         # Reshape input for rotation (split last dim into pairs)
-        x = x.reshape(b, seq_len, nh, hs // 2, 2)  # Shape: [b, seq_len, nh, hs // 2, 2]
-
+        x = x.reshape(*x.shape[:-1], -1, 2)  # Shape: [b, seq_len, nh, hs // 2, 2]
+        print(f"shape of x after reshaping in RoPE: {x.shape}")
+        # this or x = x.view(b, seq_len, nh, hs // 2, 2) # Shape: [b, seq_len, nh, hs // 2, 2]
         # Add singleton dimensions to rope_cache for broadcasting
         rope_cache = rope_cache.unsqueeze(0).unsqueeze(2)  # Shape: [1, seq_len, 1, h_s // 2, 2]
-
+        # rope_cache = rope_cache.view(-1, x.size(1), 1, x.size(3), 2)
+        print(f"Shape of rope_cache in RoPE: {rope_cache.shape}")
+        
         # Perform the RoPE rotation
         rotated = torch.stack([
             x[..., 0] * rope_cache[..., 0] - x[..., 1] * rope_cache[..., 1],  # cos * even - sin * odd
@@ -114,6 +134,8 @@ class RotaryPositionEmbeddings(nn.Module):
         ], dim=-1)  # Shape: [b, seq_len, nh, hs // 2, 2]
 
         # Flatten the last two dimensions back into the original shape
+        print(f"shape of rotated before flattening in RoPE: {rotated.shape}")
+        print(f"shape of rotated after flattening in RoPE: {rotated.flatten(-2).shape}")
         return rotated.flatten(-2).type_as(x)  # Shape: [b, seq_len, nh, hs]
 
 class AttentionHead(nn.Module):
@@ -122,9 +144,9 @@ class AttentionHead(nn.Module):
     def __init__(self, head_size):
         super().__init__()
         # usually bias is not used in self-attention TODO: understand better why
-        self.key = nn.Linear(n_emb, head_size, bias=False)
-        self.query = nn.Linear(n_emb, head_size, bias=False)
-        self.value = nn.Linear(n_emb, head_size, bias=False)
+        self.key = nn.Linear(n_emb, n_emb, bias=False)
+        self.query = nn.Linear(n_emb, n_emb, bias=False)
+        self.value = nn.Linear(n_emb, n_emb, bias=False)
         # triangular mask to prevent attending to future tokens
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
         # using register buffer ensures that tril is not initialized as a param, so it won't be optimized during training
@@ -133,16 +155,13 @@ class AttentionHead(nn.Module):
 
     def forward(self, x):
         B, T, C = x.shape
-        print(f"Shape of x: {x.shape}")
         k = self.key(x) # BxTxC
         q = self.query(x) # BxTxC
         v = self.value(x) # BxTxC
-        print(f"Shape of k: {k.shape}")
         
         head_size = C // n_heads
-        k = k.view(B, T, n_heads, head_size // n_heads) # B x T x n_h x h_s
-        q = q.view(B, T, n_heads, head_size // n_heads) # B x T x n_h x h_s
-        print('am i even getting here')
+        k = k.view(B, T, n_heads, head_size) # B x T x n_h x h_s
+        q = q.view(B, T, n_heads, head_size) # B x T x n_h x h_s
         # apply rotary position embeddings
         k = self.rope(k)
         q = self.rope(q)
@@ -175,7 +194,6 @@ class MultiHeadAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
     
     def forward(self, x):
-        print('tacos -2')
         out = torch.cat([h(x) for h in self.heads], dim=-1) # BxTxC
         out = self.projection(out)
         return self.dropout(out)
@@ -194,7 +212,6 @@ class FeedForwardNN(nn.Module):
         )
     
     def forward(self, x):
-        print('tacos 2')
         return self.net(x)
 
 class Block(nn.Module):
@@ -209,13 +226,9 @@ class Block(nn.Module):
         self.ln2 = nn.LayerNorm(n_emb)
 
     def forward(self, x):
-        print('tacos -1')
-        print(f"Shape of x in Block: {x.shape}")
         x = x + self.sa(self.ln1(x)) # residual connection # TODO: test using layer norm after sa and ffn as in original transformer paper 
         # and understand why there was an improvement in the new method
-        print('tacos 0')
         x = x + self.ffn(self.ln2(x)) # residual connection (damn that was a very easy change to make)
-        print('tacos 1')
         return x
 
 class NanoGPT(nn.Module):
@@ -304,7 +317,6 @@ for iter in tqdm(range(epochs), desc="Training Epochs"):
     # Training phase
     model.train()  # Set model to training mode
     xb, yb = get_batch('train')
-    print(f"xb shape: {xb.shape}")
     logits, train_loss = model(xb, yb)
 
     # Zero gradients, backward pass, and optimizer step
