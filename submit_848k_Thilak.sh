@@ -18,5 +18,5 @@ cd ~/
 source /fs/classhomes/fall2024/cmsc848k/c848k006/gpt2-venv/bin/activate
 echo "venv started"
 #srun -u python main.py --test --config cfgs/finetune_modelnet.yaml --exp_name test14_veckm_modelnet40 --ckpts experiments/finetune_modelnet/cfgs/modelnet40_veckm14/ckpt-best.pth
-srun -u torchrun --standalone --nproc_per_node=4 /fs/classhomes/fall2024/cmsc848k/c848k006/848k-project/gpt2_alibi_testing_v2.py
+srun -u torchrun --standalone --nproc_per_node=4 /fs/classhomes/fall2024/cmsc848k/c848k006/848k-project/gpt2_rope.py
 echo "ran successfully"
