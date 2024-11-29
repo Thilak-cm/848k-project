@@ -16,6 +16,8 @@ import os
 from transformers import AutoTokenizer
 import wandb
 import numpy as np
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
 from hellaswag import render_example, iterate_examples
 import tiktoken
 import os
@@ -354,8 +356,6 @@ def compare(model, device):
                 assert torch.allclose(sd[k], sd_hf[k], atol=1e-5), f"Weight mismatch for key: {k}"
     print("All weights match")
 ########################################################################################
-
-
 
 def load_tokens(filename):
     try: npt = np.load(filename, allow_pickle=True)
@@ -721,8 +721,6 @@ for epoch in range(max_steps):
             "avg_time_per_epoch": avg_time / (epoch + 1),
             "avg_tokens_per_sec": avg_tokens_per_sec / (epoch + 1)
         })
-
-        
         # if epoch > 0 and (epoch % 5000 == 0 or last_step):
         if epoch >= 0 and (epoch % 1000 == 0 or last_step):
             if master_process: 
