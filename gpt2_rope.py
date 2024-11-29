@@ -92,6 +92,9 @@ class RotaryPositionEmbeddings(nn.Module):
         self.config = config
         self.rope_init()
     
+    def reset_parameters(self):
+        self.rope_init()
+    
     def rope_init(self):
         '''
         Initialize the RoPE cache with sin and cos values for each position.
@@ -127,20 +130,20 @@ class RotaryPositionEmbeddings(nn.Module):
         '''
         b, seq_len, nh, hs = x.shape  # Extract input dimensions
         # TODO: if n_emb is 32, nh is 2, hs should be 16 (n_emb // nh) but it is 8, why?
-        print(f"shape of x before reshaping in RoPE: {x.shape}")
+        # if master_process: print(f"shape of x before reshaping in RoPE: {x.shape}")
 
         # Slice the RoPE cache to match the sequence length
-        print(f"shape of cache before slicing in RoPE: {self.cache.shape}")
+        # print(f"shape of cache before slicing in RoPE: {self.cache.shape}")
         # rope_cache = self.cache[:seq_len].to(x.device)  # Shape: [seq_len, n_emb // 2, 2]
         rope_cache = self.cache[:seq_len, :hs // 2].to(x.device)
         # Reshape input for rotation (split last dim into pairs)
         x = x.reshape(*x.shape[:-1], -1, 2)  # Shape: [b, seq_len, nh, hs // 2, 2]
-        print(f"shape of x after reshaping in RoPE: {x.shape}")
+        # print(f"shape of x after reshaping in RoPE: {x.shape}")
         # this or x = x.view(b, seq_len, nh, hs // 2, 2) # Shape: [b, seq_len, nh, hs // 2, 2]
         # Add singleton dimensions to rope_cache for broadcasting
         rope_cache = rope_cache.unsqueeze(0).unsqueeze(2)  # Shape: [1, seq_len, 1, h_s // 2, 2]
         # rope_cache = rope_cache.view(-1, x.size(1), 1, x.size(3), 2)
-        print(f"Shape of rope_cache in RoPE: {rope_cache.shape}")
+        # print(f"Shape of rope_cache in RoPE: {rope_cache.shape}")
         
         # Perform the RoPE rotation
         rotated = torch.stack([
@@ -149,8 +152,8 @@ class RotaryPositionEmbeddings(nn.Module):
         ], dim=-1)  # Shape: [b, seq_len, nh, hs // 2, 2]
 
         # Flatten the last two dimensions back into the original shape
-        print(f"shape of rotated before flattening in RoPE: {rotated.shape}")
-        print(f"shape of rotated after flattening in RoPE: {rotated.flatten(-2).shape}")
+        # print(f"shape of rotated before flattening in RoPE: {rotated.shape}")
+        # print(f"shape of rotated after flattening in RoPE: {rotated.flatten(-2).shape}")
         return rotated.flatten(-2).type_as(x)  # Shape: [b, seq_len, nh, hs]
 
 # This is for self attention block
@@ -191,7 +194,6 @@ class CausalSelfAttention(nn.Module):
 
         q = self.rope(q)
         k = self.rope(k)
-
 
         # Attention mechanism
         # att = (q @ k.transpose(-2, -1)) * (1.0 / ((k.size(-1)) ** 0.5))
@@ -406,8 +408,6 @@ def compare(model, device):
     print("All weights match")
 ########################################################################################
 
-
-
 def load_tokens(filename):
     try: npt = np.load(filename, allow_pickle=True)
     except: npt = np.fromfile(filename, dtype=np.uint16)  # Replace dtype as needed
@@ -532,7 +532,7 @@ model = torch.compile(model)
  
 # This is for ddp
 if ddp:
-    model = DDP(model, device_ids=[ddp_local_rank], output_device=ddp_local_rank)
+    model = DDP(model, device_ids=[ddp_local_rank], output_device=ddp_local_rank, find_unused_parameters=True)
 raw_model = model.module if ddp else model # Always contains the "raw" unwrapped model
 
 # learning rate scheduler parameters
@@ -561,7 +561,7 @@ optimizer = raw_model.configure_optimizers(weight_decay=weight_decay, lr=6e-4, d
 
 # This is for gradient accumulation
 total_batch_size = 2**19 # 500K tokens
-B, T = 32, 1024
+B, T = 4, 1024
 
 #The below steps contain the number of steps to accumulate the gradients including multiple GPU steps too
 assert total_batch_size % (B * T * ddp_world_size) == 0, f"Batch size {total_batch_size} is not divisible by B * T = {B * T}"
