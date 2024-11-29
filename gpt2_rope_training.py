@@ -20,6 +20,19 @@ import torch._dynamo
 torch._dynamo.config.suppress_errors = True
 from hellaswag import render_example, iterate_examples
 import tiktoken
+import os
+import re
+
+path = os.path.dirname(os.path.abspath(__file__))
+
+if path != '/fs/nexus-scratch/thilakcm/848k-project':
+    pattern = r'c848k\d+'
+    account = re.findall(pattern, path)[0]
+    save_folder = f'/fs/class-projects/fall2024/cmsc848k/{account}/ROPE'
+    os.makedirs(save_folder, exist_ok=True)
+else:
+    save_folder = '/fs/nexus-scratch/thilakcm/ROPE'
+    os.makedirs(save_folder, exist_ok=True)
 
 #%%
 # This is for distributed data parallelism
@@ -285,7 +298,7 @@ class GPT(nn.Module):
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, model block size is {self.config.block_size}"
 
         # IMP: Token and Positional Embeddings
-        pos = torch.arange(0, T, device=idx.device, dtype=torch.long)
+        # pos = torch.arange(0, T, device=idx.device, dtype=torch.long)
         # pos_emb = self.transformer.wpe(pos)  #Positional Embeddings of shape (T, n_embed)
         tok_emb = self.transformer.wte(idx)  #Token Embeddings of shape (B, T, n_embed)
         x = tok_emb # + pos_emb # broadcast along the batch dimension
@@ -539,7 +552,7 @@ raw_model = model.module if ddp else model # Always contains the "raw" unwrapped
 max_lr = 6e-4
 min_lr = max_lr / 10
 warmup_steps = 715
-max_steps = 19073 #19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+max_steps = 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
 # 20 is used for testing purposes
 
 # cosine annealing learning rate scheduler
@@ -561,7 +574,7 @@ optimizer = raw_model.configure_optimizers(weight_decay=weight_decay, lr=6e-4, d
 
 # This is for gradient accumulation
 total_batch_size = 2**19 # 500K tokens
-B, T = 4, 1024
+B, T = 16, 1024
 
 #The below steps contain the number of steps to accumulate the gradients including multiple GPU steps too
 assert total_batch_size % (B * T * ddp_world_size) == 0, f"Batch size {total_batch_size} is not divisible by B * T = {B * T}"
@@ -613,7 +626,7 @@ for epoch in range(max_steps):
     last_step = (epoch == max_steps - 1)
 
     # once in a while evaluate our validation loss
-    if (epoch > 0 and epoch % 1000 == 0) or last_step:
+    if (epoch > 0 and epoch % 1000 == 0) or last_step and False:
         if master_process:  print("evaluating validation loss:")
         model.eval()
         val_loader.reset()
@@ -639,8 +652,8 @@ for epoch in range(max_steps):
                     wandb.save(f"model_{epoch}.pth")
                     print("Saved model artifact in torch and wandb")
 
-    # once in a while evaluate hellaswag
-    if (epoch > 0 and epoch % 1000 == 0) or last_step:
+        # once in a while evaluate hellaswag
+
         if master_process: print('evaluating hellaswag benchmark performance')
         num_correct_norm = 0
         num_total = 0
@@ -675,7 +688,7 @@ for epoch in range(max_steps):
             if master_process: wandb.log({"hellaswag_accuracy": hellaswag_accuracy})
 
     # once in a while generate from the model (except epoch 0, which is noise)
-    if (epoch > 0 and epoch % 1000 == 0) or last_step:
+
         model.eval()
         num_return_sequences = 4
         max_length = 32
@@ -712,8 +725,6 @@ for epoch in range(max_steps):
 
     # do one epoch of the optimization
     model.train()    
-    
-    
     optimizer.zero_grad()
     loss_accum = 0.0
     # This is for gradient accumulation
@@ -773,63 +784,19 @@ for epoch in range(max_steps):
             "avg_time_per_epoch": avg_time / (epoch + 1),
             "avg_tokens_per_sec": avg_tokens_per_sec / (epoch + 1)
         })
+        # if epoch > 0 and (epoch % 5000 == 0 or last_step):
+        if epoch >= 0 and (epoch % 1000 == 0 or last_step):
+            if master_process: 
+                # you might also want to add optimizer.state_dict() and
+                # rng seeds etc., if you wanted to more exactly resume training
+                torch.save(raw_model.state_dict(), f"{save_folder}/model_{epoch}.pth")
+                print("Saved model artifact in torch and wandb")
+
 # %%
 if master_process:
-    wandb.save('final_epoch_model.pth')
+    torch.save(raw_model.state_dict(), f'{save_folder}/final_epoch_model.pth')
     print(f"Average time: {avg_time / max_steps * 1000}ms, Average tokens/sec: {avg_tokens_per_sec / max_steps}")
 
 # Destroy all processes if ddp is true
 if ddp: 
     destroy_process_group()
-
-
-# # %%
-# ########################################################################################
-# # Loading a pretrained model and generating text
-# # Generate text
-
-# model = GPT.from_pretrained('gpt2')
-# model.eval()
-# model.to(device)
-# compare(model, device)
-
-# max_length = 30 # Maximum length of the generated text
-# num_return_sequences = 5 # Number of different answers to generate
-
-# # Prefix tokens
-# from transformers import AutoTokenizer
-# tokenizer = AutoTokenizer.from_pretrained('gpt2')
-
-# tokens = tokenizer.encode("So, this morning I started studying for the interview in the lab. This was not", return_tensors='pt') # (8,)
-# # tokens = torch.tensor(tokens, dtype=torch.long)
-# # Repeat the tokens for the number of return sequences
-# tokens = tokens.repeat(num_return_sequences, 1)  # (5, 8)
-# x = tokens.to('cuda')
-
-# # Another way
-# # import tiktoken
-# # enc = tiktoken.get_encoding('gpt2')
-# # tokens = enc.encode("Hello, I'm a language model,")
-# # tokens = torch.tensor(tokens, dtype=torch. long) # (8. )
-# # tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # (5, 8)
-# # x = tokens.to('cuda')
-
-
-# # x - (B, T) - (Batch Size, Sequence Length)
-# torch.manual_seed(42)
-# torch.cuda.manual_seed(42)
-# while x.size(1) < max_length:
-#     model.eval()
-#     with torch.no_grad():
-#         logits = model(x)[0] #x, loss
-#         probs = F.softmax(logits[:, -1, :], dim=-1)
-#         topk_probs, topk_indices = torch.topk(probs, k=50, dim=-1)  #k=50 is GPT-2 default
-#         ix = torch.multinomial(topk_probs, num_samples=1)
-#         xcol = torch.gather(topk_indices, -1, ix)
-#         x = torch.cat((x, xcol), dim=1)
-
-# #print generated text
-# for i in range(num_return_sequences):
-#     print(tokenizer.decode(x[i, :].tolist()))
-#     # print(enc.decode(x[i, :].tolist()))
-# ########################################################################################
