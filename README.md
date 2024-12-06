@@ -10,7 +10,7 @@ The project is inspired by Andrej Karpathy's "make more" series and explores:
 
 Key highlights:
 - **Recreating iconic research papers:** For hands-on experience in implementing advanced NLP concepts.
-- **Extensive logging:** Leveraging [Weights and Biases](https://wandb.ai/) for tracking and comparing model performance.
+- **Extensive logging:** Leveraging [Weights and Biases](https://wandb.ai/GPT2_848K/GPT%202%20848K%20Nexus%20Cluster?nw=nwuserthilakcm212) for tracking and comparing model performance. WandB has been a game changer for our comparative analysis, we couldn't have done this project without the brilliance that goes on under the hood of that python library
 - **Comparative analysis:** Across different attention mechanisms and positional embeddings.
 
 ## Intentions and Goals
