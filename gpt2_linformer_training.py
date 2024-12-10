@@ -75,7 +75,7 @@ if master_process:
     # Initialize wandb to this project
     wandb.init(project="GPT 2 848K Nexus Cluster")
 
-    wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Linformer Attention", "Gelu", "training"]
+    wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Linformer Attention", "Gelu", "training", "k=216"]
 
 # GPT-2 is a decoder only transformer model
 #This is for MLP block
@@ -158,10 +158,7 @@ class CausalSelfAttention(nn.Module):
             '''
             self.dim_k = int(min(9 * self.n_embed * np.log(self.n_embed)/self.eps**2, 5 * np.log(self.block_size)/self.eps**2))
 
-        wandb.config.update({
-        # Training parameters
-            "Linformer_reduced_dimension": self.dim_k,
-        })
+
         # E = delta * R and F = np.exp(-delta) * R where R in k x n
         delta = 1/(2**self.block_size)
         self.causal_mask = gen_causal_mask(self.block_size, self.dim_k)
@@ -583,6 +580,7 @@ if master_process: # To print jsut one single time
     "gradient_accumulation_steps": grad_accum_steps,
     "world_size": ddp_world_size,
     "device": device,
+    "Linformer_reduced_dimension": raw_model.transformer['h'][0].attn.dim_k ,
 
     # Model parameters
     "embedding_size": raw_model.config.n_embed,
