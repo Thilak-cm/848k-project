@@ -546,7 +546,7 @@ max_steps = 19073
 for epoch in range(max_steps):
     last_step = (epoch == max_steps - 1)
     
-    if not ((epoch >= 0 and epoch % 1000 == 0) or last_step): 
+    if not ((epoch > 0 and epoch % 1000 == 0) or last_step): 
         if master_process: wandb.log({'nonsense': 1})
         continue
     
