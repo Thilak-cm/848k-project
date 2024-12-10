@@ -158,6 +158,10 @@ class CausalSelfAttention(nn.Module):
             '''
             self.dim_k = int(min(9 * self.n_embed * np.log(self.n_embed)/self.eps**2, 5 * np.log(self.block_size)/self.eps**2))
 
+        wandb.config.update({
+        # Training parameters
+            "Linformer_reduced_dimension": self.dim_k,
+        })
         # E = delta * R and F = np.exp(-delta) * R where R in k x n
         delta = 1/(2**self.block_size)
         self.causal_mask = gen_causal_mask(self.block_size, self.dim_k)
