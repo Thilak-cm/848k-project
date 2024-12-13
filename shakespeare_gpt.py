@@ -73,11 +73,12 @@ def get_batch(split):
 
 class RotaryPositionEmbeddings(nn.Module):
     '''Rotary Position Embeddings, as described in the RoPE paper'''
-    def __init__(self, base=10_000, n_emb=n_emb, max_seq_len=block_size):
+    def __init__(self, config=params, base=10_000):
         super().__init__()
         self.base = base
-        self.dim = n_emb
-        self.max_seq_len = max_seq_len
+        self.dim = n_emb # config.n_emb
+        self.max_seq_len = block_size # config.block_size
+        self.config = config
         self.rope_init()
     
     def rope_init(self):
@@ -98,6 +99,9 @@ class RotaryPositionEmbeddings(nn.Module):
         # Compute position * theta for sin and cos
         # idx_theta = seq_idx.view(-1, 1) * self.theta.view(1, -1) # same functionality as einsum
         idx_theta = torch.einsum("i, j -> ij", seq_idx, self.theta).float()
+        # hs_half = self.config.n_embed // self.config.n_head // 2  # Calculate hs // 2
+        hs_half = n_emb // n_heads // 2  # Calculate hs // 2
+        idx_theta = idx_theta[:, :hs_half]  # Slice to match hs_half
 
         # Precompute sin and cos
         cache = torch.stack([torch.cos(idx_theta), torch.sin(idx_theta)], dim=-1)  # Shape: [block_size, n_emb // 2, 2]
@@ -117,7 +121,8 @@ class RotaryPositionEmbeddings(nn.Module):
 
         # Slice the RoPE cache to match the sequence length
         print(f"shape of cache before slicing in RoPE: {self.cache.shape}")
-        rope_cache = self.cache[:seq_len].to(x.device)  # Shape: [seq_len, n_emb // 2, 2]
+        # rope_cache = self.cache[:seq_len].to(x.device)  # Shape: [seq_len, n_emb // 2, 2]
+        rope_cache = self.cache[:seq_len, :hs // 2].to(x.device)
         # Reshape input for rotation (split last dim into pairs)
         x = x.reshape(*x.shape[:-1], -1, 2)  # Shape: [b, seq_len, nh, hs // 2, 2]
         print(f"shape of x after reshaping in RoPE: {x.shape}")
