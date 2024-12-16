@@ -6,7 +6,6 @@ wandb/
 saved final models/
 .DS_Store
 test*
-saved final models/
 __pycache__/
 gpt2_ak_coding_test.py
 github_ssh*
@@ -25,5 +24,4 @@ slurm*
 model.pth
 gpt2_ak_coding_test.py
 log/
-saved final models/
 test*
