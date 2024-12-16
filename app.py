@@ -4,13 +4,13 @@ import os
 from tiktoken import get_encoding
 from chat_with_model import GPTConfig, generate_response
 
-# Import from scripts
-from Model_Architectures.sinusoidal_arch import sinusoidal_GPT
-from Model_Architectures.alibi_arch import alibi_GPT
-from Model_Architectures.rope_arch import rope_GPT
-from Model_Architectures.learnedPE_arch import learned_pe_GPT
-from Model_Architectures.fire_arch import fire_GPT
-from Model_Architectures.kerple_arch import kerple_GPT
+# Import model architectures
+from model_architectures.sinusoidal_arch import sinusoidal_GPT
+from model_architectures.alibi_arch import alibi_GPT
+from model_architectures.rope_arch import rope_GPT
+from model_architectures.learnedPE_arch import learned_pe_GPT
+from model_architectures.fire_arch import fire_GPT
+from model_architectures.kerple_arch import kerple_GPT
 
 # Title of the app
 st.title("Our 848K project: GPT-2 Unveiled: Comparative Insights")
