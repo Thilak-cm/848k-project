@@ -90,6 +90,7 @@ if __name__ == "__main__":
 
     print("Chat with the model! Type 'exit' to quit.")
     while True:
+        print(50 * "-")
         user_input = input("You: ")
         if user_input.lower() == "exit":
             print("Goodbye!")
