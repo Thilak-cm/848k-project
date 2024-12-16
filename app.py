@@ -2,54 +2,59 @@ import streamlit as st
 import torch
 import os
 from tiktoken import get_encoding
-from chat_with_model import GPT, GPTConfig, generate_response
+from chat_with_model import GPTConfig, generate_response
+
+# Import from scripts
+from Model_Architectures.sinusoidal_arch import sinusoidal_GPT
+from Model_Architectures.alibi_arch import alibi_GPT
+from Model_Architectures.rope_arch import rope_GPT
+from Model_Architectures.learnedPE_arch import learned_pe_GPT
+from Model_Architectures.fire_arch import fire_GPT
+from Model_Architectures.kerple_arch import kerple_GPT
 
 # Title
-st.title("Chat with Fine-Tuned GPT-2 Models")
+st.title("Our 848K project: GPT-2 Unveiled: Comparative Insights")
 
 # Sidebar for model selection
 st.sidebar.header("Select a Model")
 model_option = st.sidebar.selectbox(
-    "Choose PE + Attention Mechanism:",
-    ["ALIBI + Flash Attention", "RoPE + Flash Attention"]
+    "Choose a Positional Encoding:",
+    [
+        "ALIBI",
+        "FIRE",
+        "Kerple",
+        "Learned PE",
+        "RoPE",
+        "Sinusoidal",
+    ]
 )
 
+# Map models to their respective architectures and paths
+model_mapping = {
+    "ALIBI": (alibi_GPT, "saved final models/final_alibi_model.pth"),
+    "FIRE": (fire_GPT, "saved final models/final_fire_model.pth"),
+    "Kerple": (kerple_GPT, "saved final models/final_kerple_model.pth"),
+    "Learned PE": (learned_pe_GPT, "saved final models/final_learned_pe_model.pth"),
+    "RoPE": (rope_GPT, "saved final models/final_rope_model.pth"),
+    "Sinusoidal": (sinusoidal_GPT, "saved final models/final_sinusoidal_model.pth"),
+}
+
 # Load model based on user selection
-model_path = "saved final models/"
-pth_files = os.listdir(model_path)
-selected_model_file = None
-
-# Match model file to selection
-if model_option == "ALIBI + Flash Attention":
-    selected_model_file = [f for f in pth_files if "Alibi" in f][0]
-elif model_option == "FIRE + Flash Attention":
-    selected_model_file = [f for f in pth_files if "FIRE" in f][0]
-elif model_option == "Kerple + Flash Attention":
-    selected_model_file = [f for f in pth_files if "Kerple" in f][0]
-elif model_option == "Learned PE + Flash Attention":
-    selected_model_file = [f for f in pth_files if "Learned PE" in f][0]
-elif model_option == "RoPE + Flash Attention":
-    selected_model_file = [f for f in pth_files if "ROPE" in f][0]
-elif model_option == "Sinusoidal + Flash Attention":
-    selected_model_file = [f for f in pth_files if "Sinusoidal" in f][0]
-
-if selected_model_file:
-    selected_model_path = os.path.join(model_path, selected_model_file)
+if model_option:
+    model_class, model_path = model_mapping[model_option]
     st.sidebar.write(f"Selected Model: {model_option}")
-    st.sidebar.write(f"Model Path: {selected_model_path}")
 
-    # Load the tokenizer and model
+    # Load tokenizer and model
     st.write("Loading model...")
     tokenizer = get_encoding("gpt2")
     config = GPTConfig(vocab_size=50304)  # Match your trained model config
-    model = GPT(config)
     device = "mps" if torch.backends.mps.is_available() else "cpu"
 
-    # Load state dictionary
-    state_dict = torch.load(selected_model_path, map_location=device)
-    new_state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+    # Initialize and load the model
+    model = model_class(config).to(device)
+    state_dict = torch.load(model_path, map_location=device)
+    new_state_dict = {k.replace("_orig_mod.", "").replace("module._orig_mod.", ""): v for k, v in state_dict.items()}
     model.load_state_dict(new_state_dict)
-    model.to(device)
     model.eval()
     st.write("Model loaded successfully!")
 
@@ -60,7 +65,7 @@ if "chat_history" not in st.session_state or not isinstance(st.session_state.cha
 st.subheader("Chat")
 user_input = st.text_input("Enter your message:")
 
-if user_input and selected_model_file:
+if user_input and model_option:
     with st.spinner("Generating response..."):
         # Append user input as a separate entry
         st.session_state.chat_history.append({"role": "user", "content": user_input})
@@ -72,7 +77,9 @@ if user_input and selected_model_file:
         )
 
         # Generate response
-        response = generate_response(model, tokenizer, full_input)
+        response, generation_time = generate_response(model, tokenizer, full_input)
+
+        st.write(f"Response generated in {generation_time:.2f} seconds")
 
         # Append model response as a separate entry
         st.session_state.chat_history.append({"role": "model", "content": response})

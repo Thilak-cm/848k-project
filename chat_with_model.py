@@ -46,7 +46,7 @@ def generate_response(model, tokenizer, input_text, max_length=50):
     end_time = time.time()
     print(f"Response generated in {end_time - start_time:.2f} seconds")
     
-    return response
+    return response, end_time - start_time
 
 # Main Script
 if __name__ == "__main__":
