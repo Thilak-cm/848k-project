@@ -60,7 +60,7 @@ if master_process:
     # Initialize wandb to this project
     wandb.init(project="GPT 2 848K Nexus Cluster")
 
-    wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Flash Attention", "Gelu", "Sinusoidal Positional Encoding"]
+    wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Regular Attention", "Gelu", "Sinusoidal Positional Encoding"]
 
 # GPT-2 is a decoder only transformer model
 #This is for MLP block
@@ -114,16 +114,15 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, self.n_embed // self.n_head).transpose(1, 2)  # same for k
         v = v.view(B, T, self.n_head, self.n_embed // self.n_head).transpose(1, 2)  # same for v
 
-
         # Attention mechanism
-        # att = (q @ k.transpose(-2, -1)) * (1.0 / ((k.size(-1)) ** 0.5))
-        # # Masked Attention
-        # att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
-        # att = F.softmax(att, dim=-1)
-        # y = att @ v
+        att = (q @ k.transpose(-2, -1)) * (1.0 / ((k.size(-1)) ** 0.5))
+        # Masked Attention
+        att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+        att = F.softmax(att, dim=-1)
+        y = att @ v
 
         # Flash Attention
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # wow who knew flash attention was so easy to implement
+        # y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # wow who knew flash attention was so easy to implement
         y = y.transpose(1, 2).contiguous().view(B, T, self.n_head * (self.n_embed // self.n_head))
         # Output projection
         y = self.c_proj(y)
