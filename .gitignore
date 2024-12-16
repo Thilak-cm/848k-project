@@ -3,7 +3,10 @@ edu_fineweb10B/
 hellaswag/
 wandb/
 <<<<<<< HEAD
+<<<<<<< HEAD
 saved_final_models/
+=======
+>>>>>>> hf-models-branch
 .DS_Store
 test*
 __pycache__/
@@ -25,3 +28,4 @@ model.pth
 gpt2_ak_coding_test.py
 log/
 test*
+saved_final_models/
