@@ -175,6 +175,10 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("-m", "--model_type", type=str, default="gpt2", help="the model type to use")
+<<<<<<< HEAD
     parser.add_argument("-d", "--device", type=str, default="cuda", help="the device to use")
+=======
+    parser.add_argument("-d", "--device", type=str, default=" ", help="the device to use")
+>>>>>>> master
     args = parser.parse_args()
     evaluate(args.model_type, args.device)

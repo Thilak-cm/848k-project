@@ -17,6 +17,7 @@ from transformers import AutoTokenizer
 import wandb
 import numpy as np
 from hellaswag import render_example, iterate_examples
+<<<<<<< HEAD
 import tiktoken
 
 #%%
@@ -61,6 +62,14 @@ if master_process:
     wandb.init(project="GPT 2 848K Nexus Cluster")
 
     wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Flash Attention", "Gelu"]
+=======
+
+# Initialize wandb to this project
+wandb.init(project="GPT 2 848K")
+
+wandb.run.tags = ["GPT2 Flash Attention", "Sinusoidal Pos Embedding", "Shakesphere Dataset"]
+wandb.run.name = "Shakesphere GPT2 Flash"
+>>>>>>> master
 
 # GPT-2 is a decoder only transformer model
 #This is for MLP block
@@ -110,8 +119,12 @@ class CausalSelfAttention(nn.Module):
         q, k, v = self.c_attn(x).split(self.n_embed, dim=2)  # B x T x n_embed -> B x T x 3*n_embed -> q, k, v each of shape B x T x n_embed
         # hs (head size) = n_embed // n_head
         # C == n_emb == n_head * hs == n_head * d_k == n_head * d_v
+<<<<<<< HEAD
         # q (BxTxC) reshaped to B x T x n_head x hs then transposed to B x n_head x T x hs
         q = q.view(B, T, self.n_head, self.n_embed // self.n_head).transpose(1, 2)  # B x n_head x T x hs
+=======
+        q = q.view(B, T, self.n_head, self.n_embed // self.n_head).transpose(1, 2)  # q (BxTxC) reshaped to B x T x n_head x hs then transposed to B x n_head x T x hs
+>>>>>>> master
         k = k.view(B, T, self.n_head, self.n_embed // self.n_head).transpose(1, 2)  # same for k
         v = v.view(B, T, self.n_head, self.n_embed // self.n_head).transpose(1, 2)  # same for v
 
@@ -163,6 +176,10 @@ class GPT(nn.Module):
         super().__init__()
         self.config = config
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> master
         # Developing Transformer
         self.transformer = nn.ModuleDict({
             'wte': nn.Embedding(config.vocab_size, config.n_embed), # Token embedding weights
@@ -290,16 +307,26 @@ class GPT(nn.Module):
         # Return number of elements (numel), which is the number of parameters
         num_decay_params = sum(p.numel() for p in decay_params)
         num_no_decay_params = sum(p.numel() for p in no_decay_params)
+<<<<<<< HEAD
+=======
+        print(f"# Decayed parameter tensors: {len(decay_params)} with {num_decay_params} parameters")
+        print(f"# No Decay parameter tensors: {len(no_decay_params)} with {num_no_decay_params} parameters")
+>>>>>>> master
 
         # Check AdamW optimizer and use the fused verison if available
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and 'cuda' in device
+<<<<<<< HEAD
         optimizer = torch.optim.AdamW(optim_groups, lr=lr, betas=(0.9, 0.95), eps=1e-8, weight_decay=weight_decay, fused=use_fused)
         if master_process:
             print(100*'-')
             print(f"Using Fused AdamW: {fused_available}")
             print(f"# Decayed parameter tensors: {len(decay_params)} with {num_decay_params} parameters")
             print(f"# No Decay parameter tensors: {len(no_decay_params)} with {num_no_decay_params} parameters")
+=======
+        print(f"Using Fused AdamW: {fused_available}")
+        optimizer = torch.optim.AdamW(optim_groups, lr=lr, betas=(0.9, 0.95), eps=1e-8, weight_decay=weight_decay, fused=use_fused)
+>>>>>>> master
         return optimizer
 #%%    
 ########################################################################################
@@ -363,11 +390,14 @@ class DataLoaderLite:
         self.tokens = load_tokens(self.shards[self.current_shard])
         self.current_position = self.B * self.T * self.process_rank
 
+<<<<<<< HEAD
     def reset(self):
         # state, init at shard zero
         self.current_shard = 0
         self.tokens = load_tokens(self.shards[self.current_shard])
         self.current_position = self.B * self.T * self.process_rank
+=======
+>>>>>>> master
 
     def next_batch(self):
         B, T = self.B, self.T
@@ -389,6 +419,7 @@ class DataLoaderLite:
             self.current_position = B * T * self.process_rank
         return x,y
 
+<<<<<<< HEAD
 # -----------------------------------------------------------------------------
 # helper function for HellaSwag eval
 # takes tokens, mask, and logits, returns the index of the completion with the lowest loss
@@ -416,10 +447,52 @@ enc = tiktoken.get_encoding('gpt2')
 
 # Good, bad and ugly numbers - Why 50304? 50304 % 128 = 0 and is even 
 model = GPT(GPTConfig(vocab_size=50304)).to(device)
+=======
+
+#%%
+
+# This is for distributed data parallelism
+ddp = int(os.environ.get('RANK', -1)) != -1
+
+# If ddp is true, then we need to initialize the process group
+if ddp:  # For legends
+    assert torch.cuda.is_available()
+    init_process_group(backend='nccl')
+    ddp_rank = int(os.environ['RANK'])  # GPU 0 has rank 0, GPU 1 has rank 1, etc.
+    ddp_local_rank = int(os.environ['LOCAL_RANK']) # Local rank within the node
+    ddp_world_size = int(os.environ['WORLD_SIZE']) # Number of GPUs
+
+    device = f'cuda:{ddp_local_rank}'
+    torch.cuda.set_device(device)   
+    master_process = ddp_rank == 0  
+else:
+    ddp_rank = 0
+    ddp_local_rank = 0
+    ddp_world_size = 1
+    master_process = True
+
+    device = 'cpu' # For noobs
+    if torch.cuda.is_available(): # For adults
+        device = 'cuda'
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available(): # For kids
+        device = "mps"
+    print(f"using device: {device}" )
+
+
+# This is for reproducibility
+torch.manual_seed(1337)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(1337)
+
+# Good, bad and ugly numbers - Why 50304? 50304 % 128 = 0 and is even 
+model = GPT(GPTConfig(vocab_size=50304)).to(device)
+model.to(device)
+>>>>>>> master
 
 # count number of parameters
 num_params = sum(p.numel() for p in model.parameters())
 num_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+<<<<<<< HEAD
 if master_process:
     print(100 * '-')
     print(f"Total number of parameters: {num_params}, Trainable parameters: {num_trainable_params}")
@@ -444,13 +517,40 @@ if master_process:
 
 # log parameters to wandb
 if master_process: wandb.watch(model, log="all")
+=======
+print(f"Total number of parameters: {num_params}, Trainable parameters: {num_trainable_params}")
+
+total_tokens = 1e10 # 10B tokens
+
+# Chinchilla Scaling Law suggests that the optimal number of tokens should be about 2 times the number of parameters.
+# According to Chinchilla Law, we need at least 2 * total_params tokens
+required_tokens = num_params * 2
+print(f"According to Chinchilla Scaling Law, you need at least {required_tokens:,} tokens to train this model effectively.")
+
+# Check if the dataset meets the recommended number of tokens
+if total_tokens >= required_tokens:
+    print("✅ The dataset meets or exceeds the recommended number of tokens for effective training.")
+else:
+    shortfall = required_tokens - total_tokens
+    print("⚠️ The dataset does NOT meet the recommended number of tokens for effective training.")
+    print(f"  You are short by {shortfall:,} tokens.")
+    print("  Consider either increasing the dataset size or reducing the model's parameters for optimal training.")
+
+# log parameters to wandb
+wandb.watch(model, log="all")
+>>>>>>> master
 
 # Python interpreter is very slow. So, we need to compile the model
 # If compiled, in GPU, instead of traversing from HBM to cache for each single operation, 
 # computation is done by traversing once  
 # This is for linux only
+<<<<<<< HEAD
 model = torch.compile(model)
  
+=======
+# model = torch.compile(model)
+
+>>>>>>> master
 # This is for ddp
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank], output_device=ddp_local_rank)
@@ -460,7 +560,11 @@ raw_model = model.module if ddp else model # Always contains the "raw" unwrapped
 max_lr = 6e-4
 min_lr = max_lr / 10
 warmup_steps = 715
+<<<<<<< HEAD
 max_steps = 19073 #19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+=======
+max_steps = 20 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+>>>>>>> master
 # 20 is used for testing purposes
 
 # cosine annealing learning rate scheduler
@@ -482,12 +586,17 @@ optimizer = raw_model.configure_optimizers(weight_decay=weight_decay, lr=6e-4, d
 
 # This is for gradient accumulation
 total_batch_size = 2**19 # 500K tokens
+<<<<<<< HEAD
 B, T = 32, 1024
+=======
+B, T = 4, 1024
+>>>>>>> master
 
 #The below steps contain the number of steps to accumulate the gradients including multiple GPU steps too
 assert total_batch_size % (B * T * ddp_world_size) == 0, f"Batch size {total_batch_size} is not divisible by B * T = {B * T}"
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
 
+<<<<<<< HEAD
 if master_process: # To print jsut one single time
     print(f"Desired batch size: {total_batch_size}, Gradient Accumulation Steps: {grad_accum_steps}")
     wandb.config.update({
@@ -507,11 +616,31 @@ if master_process: # To print jsut one single time
     "dropout": 0,
 
     # Optimizer parameters
+=======
+wandb.config.update({
+    "batch_size": B,
+    "sequence_length": T,
+    "total_batch_size": total_batch_size,
+    "device": device,
+    "gradient_accumulation_steps": grad_accum_steps,
+    "world_size": ddp_world_size,
+
+    "embedding_size": model.config.n_embed,
+    "num_layers": model.config.n_layer,
+    "num_heads": model.config.n_head,
+    "total_params": num_params,
+    "trainable_params": num_trainable_params,
+    "total_params": num_params,
+    "vocab_size": model.config.vocab_size,
+    
+    "dropout": 0,
+>>>>>>> master
     "optimizer": "AdamW",
     "weight_decay": weight_decay,
     "warmup_steps": warmup_steps,
     "max_steps": max_steps,
     "max_lr": max_lr,
+<<<<<<< HEAD
     "min_lr": min_lr,
 
     # Parameter counts
@@ -520,6 +649,14 @@ if master_process: # To print jsut one single time
     })
 train_loader = DataLoaderLite(B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train", device=device)
 val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val", device=device)
+=======
+    "min_lr": min_lr
+})
+
+if master_process: # To print jsut one single time
+    print(f"Desired batch size: {total_batch_size}, Gradient Accumulation Steps: {grad_accum_steps}")
+train_loader = DataLoaderLite(B, T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train", device=device)
+>>>>>>> master
 
 torch.cuda.empty_cache()
 # This is for TF32 - 19 bits: 1 sign, 8 range and 10 mantissa
@@ -529,6 +666,7 @@ avg_time = 0
 avg_tokens_per_sec = 0
 
 # Training loop
+<<<<<<< HEAD
 for epoch in range(max_steps):
     t0 = time.time()
     last_step = (epoch == max_steps - 1)
@@ -635,6 +773,10 @@ for epoch in range(max_steps):
     model.train()    
     
     
+=======
+for i in range(max_steps):
+    t0 = time.time()
+>>>>>>> master
     optimizer.zero_grad()
     loss_accum = 0.0
     # This is for gradient accumulation
@@ -653,6 +795,7 @@ for epoch in range(max_steps):
         loss_accum += loss.item()
         
         # loss.backward() # Do the backward pass 
+<<<<<<< HEAD
         if ddp: # Sync the gradients only on the last epoch
             model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1) 
         loss.backward() # Do the backward pass and synchronize the gradients.
@@ -662,11 +805,23 @@ for epoch in range(max_steps):
         loss_accum_tensor = torch.tensor(loss_accum, device=device)  # Ensure the tensor is on the correct device
         dist.all_reduce(loss_accum_tensor, op=dist.ReduceOp.AVG)  # Average the loss across all GPUs
         loss_accum = loss_accum_tensor.item()  # Get back the scalar value
+=======
+        if ddp: # Sync the gradients only on the last step
+            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1) 
+        loss.backward() # Do the backward pass and synchronize the gradients.
+
+    if ddp:
+        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG) # Average the loss across all GPUs
+>>>>>>> master
     # Gradient global clipping: Why is this used? Because the gradients can be very large and can cause overflow
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     
     # Learning rate scheduler
+<<<<<<< HEAD
     lr = get_lr(epoch)
+=======
+    lr = get_lr(i)
+>>>>>>> master
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
     optimizer.step()
@@ -681,12 +836,17 @@ for epoch in range(max_steps):
     best_train_loss_accum = min(best_train_loss_accum, loss_accum)
 
     if master_process:
+<<<<<<< HEAD
         if epoch % 100 == 0:
             print(f"Epoch: {epoch}, Loss: {loss_accum}, lr: {lr}, norm: {norm}, Time Difference: {(t1 - t0)* 1000}ms, #tokens/sec: {tokens_per_sec}")
+=======
+        print(f"Epoch: {i}, Loss: {loss_accum}, lr: {lr}, norm: {norm}, Time Difference: {(t1 - t0)* 1000}ms, #tokens/sec: {tokens_per_sec}")
+>>>>>>> master
         # Wandb logging
         wandb.log({
             "train_loss": loss_accum,
             "best_train_loss": best_train_loss_accum,
+<<<<<<< HEAD
             "lr": get_lr(epoch-1),
             "norm": norm,
             "tokens_per_sec": tokens_per_sec,
@@ -698,11 +858,27 @@ for epoch in range(max_steps):
 if master_process:
     wandb.save('final_epoch_model.pth')
     print(f"Average time: {avg_time / max_steps * 1000}ms, Average tokens/sec: {avg_tokens_per_sec / max_steps}")
+=======
+            "lr": get_lr(i-1),
+            "norm": norm,
+            "tokens_per_sec": tokens_per_sec,
+            "current_epoch_time": t1 - t0
+        })
+# %%
+print(f"Average time: {avg_time / max_steps * 1000}ms, Average tokens/sec: {avg_tokens_per_sec / max_steps}")
+>>>>>>> master
 
 # Destroy all processes if ddp is true
 if ddp: 
     destroy_process_group()
 
+<<<<<<< HEAD
+=======
+# save the model
+wandb.save("model.pth")
+torch.save(model.state_dict(), "model.pth")
+
+>>>>>>> master
 
 # # %%
 # ########################################################################################
