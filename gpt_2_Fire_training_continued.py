@@ -18,22 +18,22 @@ import wandb
 import numpy as np
 from hellaswag import render_example, iterate_examples
 import tiktoken
-import os
 import re
 
 path = os.path.dirname(os.path.abspath(__file__))
+
 if path != '/fs/nexus-scratch/thilakcm/848k-project':
     pattern = r'c848k\d+'
     account = re.findall(pattern, path)[0]
     save_folder = f'/fs/class-projects/fall2024/cmsc848k/{account}/FIRE'
     os.makedirs(save_folder, exist_ok=True)
-else: 
+else:
     save_folder = '/fs/nexus-scratch/thilakcm/FIRE'
     os.makedirs(save_folder, exist_ok=True)
+
 #%%
 # This is for distributed data parallelism
 ddp = int(os.environ.get('RANK', -1)) != -1
-
 
 
 # If ddp is true, then we need to initialize the process group
@@ -139,7 +139,9 @@ class CausalSelfAttention(nn.Module):
         # y = att @ v
 
         # Flash Attention
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=False, attn_mask= self.fire_causal_mask(q)) # wow who knew flash attention was so easy to implement
+        fire_bias = self.fire_causal_mask(q)
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=False, attn_mask=fire_bias) # wow who knew flash attention was so easy to implement
+        # y = F.scaled_dot_product_attention(q, k, v, is_causal=False, attn_mask= self.fire_causal_mask(q)) # wow who knew flash attention was so easy to implement
         y = y.transpose(1, 2).contiguous().view(B, T, self.n_head * (self.n_embed // self.n_head))
         # Output projection
         y = self.c_proj(y)
@@ -195,7 +197,12 @@ class FIRE(nn.Module):
         # Progressive interpolation
         normalized_distance = rel_distance / pos_normalizer
         fire_bias = self.mlp(normalized_distance.unsqueeze(-1))
-        fire_bias = fire_bias.unsqueeze(0).permute(0, 3, 1, 2)
+        # The commented and the uncommented code are the same but uncommented code is faster
+        # fire_bias = fire_bias.unsqueeze(0).permute(0, 3, 1, 2)
+        # fire_bias = fire_bias.permute(2, 1, 0).unsqueeze(0)
+        fire_bias = fire_bias.permute(2, 0, 1)
+        mask = torch.ones(seq_length, seq_length).tril(diagonal=0).repeat(fire_bias.shape[0], 1, 1)
+        fire_bias = fire_bias.masked_fill(mask.logical_not().to(device), float('-inf')).unsqueeze(0)
         return fire_bias
     
 # This is for transformer block
@@ -529,7 +536,11 @@ model = torch.compile(model)
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank], output_device=ddp_local_rank)
 raw_model = model.module if ddp else model # Always contains the "raw" unwrapped model
-raw_model.load_state_dict(torch.load(f"{save_folder}/model_11000.pth", weights_only=True))
+pattern = r'model_(\d+).pth'
+saved_epoch = max([int(re.findall(pattern, i)[0]) 
+                   for i in os.listdir(save_folder) 
+                   if len(re.findall(pattern, i))])
+raw_model.load_state_dict(torch.load(f"{save_folder}/model_{saved_epoch}.pth", weights_only=True))
 
 if master_process:
     for name, param in raw_model.named_parameters():
@@ -538,7 +549,7 @@ if master_process:
 max_lr = 6e-4
 min_lr = max_lr / 10
 warmup_steps = 715
-max_steps = 19073 #19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+max_steps = 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
 # 20 is used for testing purposes
 
 # cosine annealing learning rate scheduler
@@ -610,12 +621,13 @@ avg_tokens_per_sec = 0
 for epoch in range(max_steps):
     last_step = (epoch == max_steps - 1)
     
-    if (epoch < 11000): 
+    if (epoch < saved_epoch): 
         if master_process: wandb.log({'nonsense': 1})
         continue
     
-    ########################## once in a while evaluate our validation loss
+
     t0 = time.time()
+    ########################## once in a while evaluate our validation loss
     if ((epoch > 0 and epoch % 1000 == 0) or last_step) and False:
         if master_process:  print("evaluating validation loss:")
         model.eval()
@@ -736,6 +748,8 @@ for epoch in range(max_steps):
         if ddp: # Sync the gradients only on the last epoch
             model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1) 
         loss.backward() # Do the backward pass and synchronize the gradients.
+        # for name, param in model.named_parameters():
+        #     if param.grad is None: print(f"Parameter {name} is unused.")
 
     # Accumulate loss across all GPUs if using DDP
     if ddp:
@@ -774,7 +788,7 @@ for epoch in range(max_steps):
             "avg_time_per_epoch": avg_time / (epoch + 1),
             "avg_tokens_per_sec": avg_tokens_per_sec / (epoch + 1)
         })
-        if epoch >= 0 and (epoch % 1000 == 0 or last_step):
+        if epoch > 0 and (epoch % 1000 == 0 or last_step):
             if master_process: 
                 # you might also want to add optimizer.state_dict() and
                 # rng seeds etc., if you wanted to more exactly resume training
@@ -788,55 +802,3 @@ if master_process:
 # Destroy all processes if ddp is true
 if ddp: 
     destroy_process_group()
-
-
-# # %%
-# ########################################################################################
-# # Loading a pretrained model and generating text
-# # Generate text
-
-# model = GPT.from_pretrained('gpt2')
-# model.eval()
-# model.to(device)
-# compare(model, device)
-
-# max_length = 30 # Maximum length of the generated text
-# num_return_sequences = 5 # Number of different answers to generate
-
-# # Prefix tokens
-# from transformers import AutoTokenizer
-# tokenizer = AutoTokenizer.from_pretrained('gpt2')
-
-# tokens = tokenizer.encode("So, this morning I started studying for the interview in the lab. This was not", return_tensors='pt') # (8,)
-# # tokens = torch.tensor(tokens, dtype=torch.long)
-# # Repeat the tokens for the number of return sequences
-# tokens = tokens.repeat(num_return_sequences, 1)  # (5, 8)
-# x = tokens.to('cuda')
-
-# # Another way
-# # import tiktoken
-# # enc = tiktoken.get_encoding('gpt2')
-# # tokens = enc.encode("Hello, I'm a language model,")
-# # tokens = torch.tensor(tokens, dtype=torch. long) # (8. )
-# # tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # (5, 8)
-# # x = tokens.to('cuda')
-
-
-# # x - (B, T) - (Batch Size, Sequence Length)
-# torch.manual_seed(42)
-# torch.cuda.manual_seed(42)
-# while x.size(1) < max_length:
-#     model.eval()
-#     with torch.no_grad():
-#         logits = model(x)[0] #x, loss
-#         probs = F.softmax(logits[:, -1, :], dim=-1)
-#         topk_probs, topk_indices = torch.topk(probs, k=50, dim=-1)  #k=50 is GPT-2 default
-#         ix = torch.multinomial(topk_probs, num_samples=1)
-#         xcol = torch.gather(topk_indices, -1, ix)
-#         x = torch.cat((x, xcol), dim=1)
-
-# #print generated text
-# for i in range(num_return_sequences):
-#     print(tokenizer.decode(x[i, :].tolist()))
-#     # print(enc.decode(x[i, :].tolist()))
-# ########################################################################################

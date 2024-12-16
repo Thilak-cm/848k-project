@@ -139,7 +139,9 @@ class CausalSelfAttention(nn.Module):
         # y = att @ v
 
         # Flash Attention
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=False, attn_mask= self.fire_causal_mask(q)) # wow who knew flash attention was so easy to implement
+        fire_bias = self.fire_causal_mask(q)
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=False, attn_mask=fire_bias) # wow who knew flash attention was so easy to implement
+        # y = F.scaled_dot_product_attention(q, k, v, is_causal=False, attn_mask= self.fire_causal_mask(q)) # wow who knew flash attention was so easy to implement
         y = y.transpose(1, 2).contiguous().view(B, T, self.n_head * (self.n_embed // self.n_head))
         # Output projection
         y = self.c_proj(y)
@@ -195,7 +197,12 @@ class FIRE(nn.Module):
         # Progressive interpolation
         normalized_distance = rel_distance / pos_normalizer
         fire_bias = self.mlp(normalized_distance.unsqueeze(-1))
-        fire_bias = fire_bias.unsqueeze(0).permute(0, 3, 1, 2)
+        # The commented and the uncommented code are the same but uncommented code is faster
+        # fire_bias = fire_bias.unsqueeze(0).permute(0, 3, 1, 2)
+        # fire_bias = fire_bias.permute(2, 1, 0).unsqueeze(0)
+        fire_bias = fire_bias.permute(2, 0, 1)
+        mask = torch.ones(seq_length, seq_length).tril(diagonal=0).repeat(fire_bias.shape[0], 1, 1)
+        fire_bias = fire_bias.masked_fill(mask.logical_not().to(device), float('-inf')).unsqueeze(0)
         return fire_bias
     
 # This is for transformer block
@@ -559,7 +566,7 @@ optimizer = raw_model.configure_optimizers(weight_decay=weight_decay, lr=6e-4, d
 
 # This is for gradient accumulation
 total_batch_size = 2**19 # 500K tokens
-B, T = 32, 1024
+B, T = 8, 1024
 
 #The below steps contain the number of steps to accumulate the gradients including multiple GPU steps too
 assert total_batch_size % (B * T * ddp_world_size) == 0, f"Batch size {total_batch_size} is not divisible by B * T = {B * T}"
@@ -731,6 +738,8 @@ for epoch in range(max_steps):
         if ddp: # Sync the gradients only on the last epoch
             model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1) 
         loss.backward() # Do the backward pass and synchronize the gradients.
+        # for name, param in model.named_parameters():
+        #     if param.grad is None: print(f"Parameter {name} is unused.")
 
     # Accumulate loss across all GPUs if using DDP
     if ddp:
@@ -783,55 +792,3 @@ if master_process:
 # Destroy all processes if ddp is true
 if ddp: 
     destroy_process_group()
-
-
-# # %%
-# ########################################################################################
-# # Loading a pretrained model and generating text
-# # Generate text
-
-# model = GPT.from_pretrained('gpt2')
-# model.eval()
-# model.to(device)
-# compare(model, device)
-
-# max_length = 30 # Maximum length of the generated text
-# num_return_sequences = 5 # Number of different answers to generate
-
-# # Prefix tokens
-# from transformers import AutoTokenizer
-# tokenizer = AutoTokenizer.from_pretrained('gpt2')
-
-# tokens = tokenizer.encode("So, this morning I started studying for the interview in the lab. This was not", return_tensors='pt') # (8,)
-# # tokens = torch.tensor(tokens, dtype=torch.long)
-# # Repeat the tokens for the number of return sequences
-# tokens = tokens.repeat(num_return_sequences, 1)  # (5, 8)
-# x = tokens.to('cuda')
-
-# # Another way
-# # import tiktoken
-# # enc = tiktoken.get_encoding('gpt2')
-# # tokens = enc.encode("Hello, I'm a language model,")
-# # tokens = torch.tensor(tokens, dtype=torch. long) # (8. )
-# # tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # (5, 8)
-# # x = tokens.to('cuda')
-
-
-# # x - (B, T) - (Batch Size, Sequence Length)
-# torch.manual_seed(42)
-# torch.cuda.manual_seed(42)
-# while x.size(1) < max_length:
-#     model.eval()
-#     with torch.no_grad():
-#         logits = model(x)[0] #x, loss
-#         probs = F.softmax(logits[:, -1, :], dim=-1)
-#         topk_probs, topk_indices = torch.topk(probs, k=50, dim=-1)  #k=50 is GPT-2 default
-#         ix = torch.multinomial(topk_probs, num_samples=1)
-#         xcol = torch.gather(topk_indices, -1, ix)
-#         x = torch.cat((x, xcol), dim=1)
-
-# #print generated text
-# for i in range(num_return_sequences):
-#     print(tokenizer.decode(x[i, :].tolist()))
-#     # print(enc.decode(x[i, :].tolist()))
-# ########################################################################################

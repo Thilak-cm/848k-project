@@ -20,6 +20,18 @@ from hellaswag import render_example, iterate_examples
 import tiktoken
 import torch._dynamo
 torch._dynamo.config.suppress_errors = True
+import re
+
+path = os.path.dirname(os.path.abspath(__file__))
+
+if path != '/fs/nexus-scratch/thilakcm/848k-project':
+    pattern = r'c848k\d+'
+    account = re.findall(pattern, path)[0]
+    save_folder = f'/fs/class-projects/fall2024/cmsc848k/{account}/Kerple'
+    os.makedirs(save_folder, exist_ok=True)
+else:
+    save_folder = '/fs/nexus-scratch/thilakcm/Kerple'
+    os.makedirs(save_folder, exist_ok=True)
 
 #%%
 # This is for distributed data parallelism
@@ -781,12 +793,12 @@ for epoch in range(max_steps):
             if master_process: 
                 # you might also want to add optimizer.state_dict() and
                 # rng seeds etc., if you wanted to more exactly resume training
-                torch.save(raw_model.state_dict(), f"/fs/class-projects/fall2024/cmsc848k/c848k017/Kerple/model_{epoch}.pth")
+                torch.save(raw_model.state_dict(), f"{save_folder}/model_{epoch}.pth")
                 print("Saved model artifact in torch and wandb")
 
 # %%
 if master_process:
-    torch.save(raw_model.state_dict(), '/fs/class-projects/fall2024/cmsc848k/c848k017/Kerple/final_epoch_model.pth')
+    torch.save(raw_model.state_dict(), f'{save_folder}/final_epoch_model.pth')
     print(f"Average time: {avg_time / max_steps * 1000}ms, Average tokens/sec: {avg_tokens_per_sec / max_steps}")
 
 # Destroy all processes if ddp is true
