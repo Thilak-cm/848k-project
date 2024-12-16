@@ -2,15 +2,19 @@ import streamlit as st
 import torch
 import os
 from tiktoken import get_encoding
-from chat_with_model import GPTConfig, generate_response
+from huggingface_hub import hf_hub_download
 
-# Import model architectures
+# Import from other scripts
+from chat_with_model import GPTConfig, generate_response
 from model_architectures.sinusoidal_arch import sinusoidal_GPT
 from model_architectures.alibi_arch import alibi_GPT
 from model_architectures.rope_arch import rope_GPT
 from model_architectures.learnedPE_arch import learned_pe_GPT
 from model_architectures.fire_arch import fire_GPT
 from model_architectures.kerple_arch import kerple_GPT
+
+
+repo_id = "thillsss/848k-models"  # Your Hugging Face model repo
 
 # Title of the app
 st.title("Our 848K project: GPT-2 Unveiled: Comparative Insights")
@@ -87,14 +91,13 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# Map models to their respective architectures and paths
 model_mapping = {
-    "ALIBI": (alibi_GPT, "saved final models/final_alibi_model.pth"),
-    "FIRE": (fire_GPT, "saved final models/final_fire_model.pth"),
-    "Kerple": (kerple_GPT, "saved final models/final_kerple_model.pth"),
-    "Learned PE": (learned_pe_GPT, "saved final models/final_learned_pe_model.pth"),
-    "RoPE": (rope_GPT, "saved final models/final_rope_model.pth"),
-    "Sinusoidal": (sinusoidal_GPT, "saved final models/final_sinusoidal_model.pth"),
+    "ALIBI": (alibi_GPT, "final_alibi_model.pth"),
+    "FIRE": (fire_GPT, "final_fire_model.pth"),
+    "Kerple": (kerple_GPT, "final_kerple_model.pth"),
+    "Learned PE": (learned_pe_GPT, "final_learned_pe_model.pth"),
+    "RoPE": (rope_GPT, "final_rope_model.pth"),
+    "Sinusoidal": (sinusoidal_GPT, "final_sinusoidal_model.pth"),
 }
 
 # Load model based on user selection
@@ -110,7 +113,11 @@ if model_option:
 
     # Initialize and load the model
     model = model_class(config).to(device)
-    state_dict = torch.load(model_path, map_location=device)
+    # Download model file dynamically from Hugging Face Hub
+    model_file_path = hf_hub_download(repo_id=repo_id, filename=model_path)
+
+    # Load the state dict
+    state_dict = torch.load(model_file_path, map_location=device)
     new_state_dict = {k.replace("_orig_mod.", "").replace("module._orig_mod.", ""): v for k, v in state_dict.items()}
     model.load_state_dict(new_state_dict)
     model.eval()
