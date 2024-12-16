@@ -7,7 +7,6 @@ saved final models/
 .DS_Store
 test*
 saved final models/
-model.pth
 __pycache__/
 gpt2_ak_coding_test.py
 github_ssh*

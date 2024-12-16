@@ -163,10 +163,6 @@ class GPT(nn.Module):
         super().__init__()
         self.config = config
 
-<<<<<<< HEAD
-=======
-
->>>>>>> master
         # Developing Transformer
         self.transformer = nn.ModuleDict({
             'wte': nn.Embedding(config.vocab_size, config.n_embed), # Token embedding weights
@@ -421,7 +417,6 @@ enc = tiktoken.get_encoding('gpt2')
 # Good, bad and ugly numbers - Why 50304? 50304 % 128 = 0 and is even 
 model = GPT(GPTConfig(vocab_size=50304)).to(device)
 model.to(device)
->>>>>>> master
 
 # count number of parameters
 num_params = sum(p.numel() for p in model.parameters())

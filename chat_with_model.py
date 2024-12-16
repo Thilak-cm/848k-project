@@ -85,7 +85,7 @@ if __name__ == "__main__":
     new_state_dict = {k.replace("_orig_mod.", "").replace("module._orig_mod.", ""): v for k, v in state_dict.items()}
     model.load_state_dict(new_state_dict)
 
-    # Load tokenizer
+    # Load tokenizer__pycache__/
     tokenizer = get_encoding("gpt2")
 
     print("Chat with the model! Type 'exit' to quit.")
