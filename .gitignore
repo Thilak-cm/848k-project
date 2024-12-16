@@ -3,3 +3,10 @@ wandb/
 */check_issue.py
 dataset/edu_fineweb10B/
 .DS_Store
+saved final models/
+test*
+__pycache__/
+github_ssh_key
+github_ssh_key.pub
+gpt2_ak_coding_test.py
+model.pth
