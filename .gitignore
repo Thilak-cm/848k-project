@@ -17,6 +17,7 @@ edu_fineweb10B/
 */__pycache__/
 */check_issue.py
 dataset/edu_fineweb10B/
+secret keys/
 .DS_Store
 github_ssh*
 gpt2-venv/
