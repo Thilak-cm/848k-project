@@ -6,12 +6,12 @@ import torch
 import time
 
 # Import model architectures
-from Model_Architectures.sinusoidal_arch import sinusoidal_GPT
-from Model_Architectures.alibi_arch import alibi_GPT
-from Model_Architectures.rope_arch import rope_GPT
-from Model_Architectures.learnedPE_arch import learned_pe_GPT
-from Model_Architectures.fire_arch import fire_GPT
-from Model_Architectures.kerple_arch import kerple_GPT
+from model_architectures.sinusoidal_arch import sinusoidal_GPT
+from model_architectures.alibi_arch import alibi_GPT
+from model_architectures.rope_arch import rope_GPT
+from model_architectures.learnedPE_arch import learned_pe_GPT
+from model_architectures.fire_arch import fire_GPT
+from model_architectures.kerple_arch import kerple_GPT
 
 device = "mps" if torch.backends.mps.is_available() else "cpu"
 
@@ -83,11 +83,13 @@ if __name__ == "__main__":
     # Load the pretrained model weights
     state_dict = torch.load(model_path, map_location=device)
     new_state_dict = {k.replace("_orig_mod.", "").replace("module._orig_mod.", ""): v for k, v in state_dict.items()}
+    new_state_dict = {k.replace("module.", ""): v for k, v in new_state_dict.items()}
     model.load_state_dict(new_state_dict)
 
     # Load tokenizer__pycache__/
     tokenizer = get_encoding("gpt2")
 
+    # sample prompt: i'm a language model. these are some of the things i can help you with:
     print("Chat with the model! Type 'exit' to quit.")
     while True:
         print(50 * "-")
@@ -95,5 +97,5 @@ if __name__ == "__main__":
         if user_input.lower() == "exit":
             print("Goodbye!")
             break
-        response = generate_response(model, tokenizer, user_input)
+        response, _ = generate_response(model, tokenizer, user_input)
         print(f"{model_name} Model: {response}")

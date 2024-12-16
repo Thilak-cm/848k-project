@@ -1,8 +1,8 @@
 # To run this code for 8 GPUs, use the following command
 # torchrun --standalone --nproc_per_node=8 gpt2_flash_sinusoidal.py
 
-from models.GPT2FlashAttention import GPT, GPTConfig
-from dataset.ShakesphereDataset import DataLoaderLite
+from GPT2FlashAttention import GPT, GPTConfig
+from dataset.shakespeare_dataset import DataLoaderLite
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 import torch
