@@ -29,6 +29,64 @@ model_option = st.sidebar.selectbox(
     ]
 )
 
+# Add authors' names and links at the bottom
+st.markdown(
+    """
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <style>
+        .footer {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            width: 100%;
+            text-align: center;
+            padding: 12px 10px;
+            background-color: #f9f9f9;
+            font-size: 13px;
+            font-family: Arial, sans-serif;
+            color: #333333;
+            box-shadow: 0px -1px 5px rgba(0, 0, 0, 0.1);
+        }
+        .footer a {
+            text-decoration: none;
+            margin: -55px;
+            margin-left: 10px;
+            color: #4F8BF9;
+            font-weight: bold;
+        }
+        .footer i {
+            margin-right: 50px;
+        }
+    </style>
+    <div class="footer">
+        <b>Authors:</b> 
+        Thilak Mohan 
+        <a href="https://www.linkedin.com/in/thilak-mohan-687b801b2/" target="_blank">
+            <i class="fab fa-linkedin"></i>
+        </a>
+        <a href="https://github.com/Thilak-cm" target="_blank">
+            <i class="fab fa-github"></i>
+        </a> |
+        Sumedha Vadlamani 
+        <a href="https://www.linkedin.com/in/sumedha-vadlamani/" target="_blank">
+            <i class="fab fa-linkedin"></i>
+        </a>
+        <a href="https://github.com/sumedha-24" target="_blank">
+            <i class="fab fa-github"></i>
+        </a> |
+        Peeyush Dyavarashetty 
+        <a href="https://www.linkedin.com/in/peeyush-dyavarashetty/" target="_blank">
+            <i class="fab fa-linkedin"></i>
+        </a>
+        <a href="https://github.com/Peeyush4" target="_blank">
+            <i class="fab fa-github"></i>
+        </a>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
 # Map models to their respective architectures and paths
 model_mapping = {
     "ALIBI": (alibi_GPT, "saved final models/final_alibi_model.pth"),
@@ -90,3 +148,4 @@ if user_input and model_option:
                 st.write(f"**You:** {message['content']}")
             else:
                 st.write(f"**Model:** {message['content']}")
+        
