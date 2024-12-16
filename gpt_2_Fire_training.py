@@ -18,10 +18,23 @@ import wandb
 import numpy as np
 from hellaswag import render_example, iterate_examples
 import tiktoken
+import re
+
+path = os.path.dirname(os.path.abspath(__file__))
+
+if path != '/fs/nexus-scratch/thilakcm/848k-project':
+    pattern = r'c848k\d+'
+    account = re.findall(pattern, path)[0]
+    save_folder = f'/fs/class-projects/fall2024/cmsc848k/{account}/FIRE'
+    os.makedirs(save_folder, exist_ok=True)
+else:
+    save_folder = '/fs/nexus-scratch/thilakcm/FIRE'
+    os.makedirs(save_folder, exist_ok=True)
 
 #%%
 # This is for distributed data parallelism
 ddp = int(os.environ.get('RANK', -1)) != -1
+
 
 # If ddp is true, then we need to initialize the process group
 if ddp:  # For legends
@@ -60,7 +73,7 @@ if master_process:
     # Initialize wandb to this project
     wandb.init(project="GPT 2 848K Nexus Cluster")
 
-    wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Flash Attention", "Gelu", "Sinusoidal Positional Encoding"]
+    wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Flash Attention", "Gelu", "FIRE PE", "Training"]
 
 # GPT-2 is a decoder only transformer model
 #This is for MLP block
@@ -99,6 +112,9 @@ class CausalSelfAttention(nn.Module):
         # Regularization
         self.n_head = config.n_head
         self.n_embed = config.n_embed
+
+
+        self.fire_causal_mask= FIRE(num_heads=config.n_head)
         # not really a bias but a mask, but following OpenAI naming convention
         self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size)).view(1, 1, config.block_size, config.block_size)) 
 
@@ -123,12 +139,72 @@ class CausalSelfAttention(nn.Module):
         # y = att @ v
 
         # Flash Attention
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # wow who knew flash attention was so easy to implement
+        fire_bias = self.fire_causal_mask(q)
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=False, attn_mask=fire_bias) # wow who knew flash attention was so easy to implement
+        # y = F.scaled_dot_product_attention(q, k, v, is_causal=False, attn_mask= self.fire_causal_mask(q)) # wow who knew flash attention was so easy to implement
         y = y.transpose(1, 2).contiguous().view(B, T, self.n_head * (self.n_embed // self.n_head))
         # Output projection
         y = self.c_proj(y)
         return y
 
+class FIRE(nn.Module):
+    def __init__(self, num_heads=12, mlp_width=32, init_c=0.1, init_L=512., eps=1e-6):
+
+        #  FIRE attention bias module.
+        #  Args:
+        #  num_heads: number of attention heads.
+        #  mlp_width: Width of MLP.
+        #  init_c: initial value of log transformation parameter
+        #  init_L: initial value of thresholding parameter
+        #  eps: small constant for numerical stability
+
+        super(FIRE, self).__init__()
+
+        # Define the MLP layers
+        self.mlp = nn.Sequential(
+        nn.Linear(1, mlp_width),
+        nn.ReLU(),
+        nn.Linear(mlp_width, num_heads) )
+
+        # Initialize c (log transformation parameter)
+        self.c = nn.Parameter(torch.tensor(init_c))
+        # Initialize L (threshold)
+        self.init_L = nn.Parameter(torch.tensor(init_L),requires_grad=False)
+        # Learn a multiplier to L
+        self.L_multiplier = nn.Parameter(torch.tensor(1.0))
+
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor):
+ 
+        #Compute FIRE attention bias.
+        #Args:x: input sequence,shape [bsz, num_heads, seq_len, hidden_dim]Returns:attention bias,
+        #shape [1, num_heads, seq_len, seq_len]
+
+        seq_length = x.size(2)
+        positions = torch.arange(seq_length,dtype=torch.float,device=x.device)
+        rel_distance = positions[:, None] - positions[None, :]
+
+        # Thresholding the normalizer
+        threshold = torch.abs(self.L_multiplier * self.init_L)
+        pos_normalizer = torch.max(positions, threshold)
+        pos_normalizer = pos_normalizer[:, None]
+
+        # Amplifying differences among local positions with log transform
+        rel_distance = torch.log(torch.abs(self.c * rel_distance) + 1)
+        pos_normalizer = torch.log(torch.abs(self.c * pos_normalizer) + 1) + self.eps
+
+        # Progressive interpolation
+        normalized_distance = rel_distance / pos_normalizer
+        fire_bias = self.mlp(normalized_distance.unsqueeze(-1))
+        # The commented and the uncommented code are the same but uncommented code is faster
+        # fire_bias = fire_bias.unsqueeze(0).permute(0, 3, 1, 2)
+        # fire_bias = fire_bias.permute(2, 1, 0).unsqueeze(0)
+        fire_bias = fire_bias.permute(2, 0, 1)
+        mask = torch.ones(seq_length, seq_length).tril(diagonal=0).repeat(fire_bias.shape[0], 1, 1)
+        fire_bias = fire_bias.masked_fill(mask.logical_not().to(device), float('-inf')).unsqueeze(0)
+        return fire_bias
+    
 # This is for transformer block
 class Block(nn.Module):
     # write 
@@ -148,6 +224,10 @@ class Block(nn.Module):
         # this is called pre-normalization and is used in the "An Image is Worth 16x16 Words" paper
         return x
 
+
+
+
+
 @dataclass
 class GPTConfig:
     block_size: int = 1024 # Maximum sequence length
@@ -166,6 +246,7 @@ class GPT(nn.Module):
         # Developing Transformer
         self.transformer = nn.ModuleDict({
             'wte': nn.Embedding(config.vocab_size, config.n_embed), # Token embedding weights
+            #'wpe': nn.Embedding(config.block_size, config.n_embed), # Positional embedding weights
             'h': nn.ModuleList([Block(config) for _ in range(config.n_layer)]), # All transformer blocks
             'ln_f': nn.LayerNorm(config.n_embed)
         })
@@ -199,33 +280,15 @@ class GPT(nn.Module):
             # if module.padding_idx is not None:
             #     torch.nn.init.zeros_(module.weight[module.padding_idx])
 
-    def get_sinusoidal_encoding(self, T):
-        # Generate position indices
-        position = torch.arange(0, T, dtype=torch.float).unsqueeze(1)  # Shape: (T, 1)
-        # Generate the scaling terms based on the embedding dimension
-        div_term = 10000 ** (-2 * torch.arange(self.config.n_embed // 2) / self.config.n_embed)  # Shape: (config.n_embed // 2,)
-        
-        # Initialize encoding tensor
-        encoding = torch.zeros(T, self.config.n_embed)  # Shape: (T, config.n_embed)
-        # Apply sine to even indices, cosine to odd indices
-        encoding[:, 0::2] = torch.sin(position * div_term)  # Even indices
-        encoding[:, 1::2] = torch.cos(position * div_term)  # Odd indices
-        return encoding
-
-
     def forward(self, idx, targets=None):
         B, T = idx.size()
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, model block size is {self.config.block_size}"
 
-        # Token Embeddings
-        tok_emb = self.transformer.wte(idx)  # Token Embeddings of shape (B, T, n_embed)
-
-        # Sinusoidal Positional Encodings
-        pos_emb = self.get_sinusoidal_encoding(T).to(idx.device)#, self.config.n_embed, idx.device)  # (T, n_embed)
-        pos_emb = pos_emb.unsqueeze(0).expand(B, -1, -1)  # Broadcast along batch dimension
-
-        # Combine token and positional embeddings
-        x = tok_emb + pos_emb
+        # IMP: Token and Positional Embeddings
+        #pos = torch.arange(0, T, device=idx.device, dtype=torch.long)
+        #pos_emb = self.transformer.wpe(pos)  #Positional Embeddings of shape (T, n_embed)
+        tok_emb = self.transformer.wte(idx)  #Token Embeddings of shape (B, T, n_embed)
+        x = tok_emb # broadcast along the batch dimension
 
         # Forward pass through each transformer block
         for block in self.transformer.h:
@@ -474,11 +537,14 @@ if ddp:
     model = DDP(model, device_ids=[ddp_local_rank], output_device=ddp_local_rank)
 raw_model = model.module if ddp else model # Always contains the "raw" unwrapped model
 
+if master_process:
+    for name, param in raw_model.named_parameters():
+        print(f"Layer: {name} | Number of parameters: {param.numel()}")
 # learning rate scheduler parameters
 max_lr = 6e-4
 min_lr = max_lr / 10
 warmup_steps = 715
-max_steps = 19073 #19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+max_steps = 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
 # 20 is used for testing purposes
 
 # cosine annealing learning rate scheduler
@@ -500,7 +566,7 @@ optimizer = raw_model.configure_optimizers(weight_decay=weight_decay, lr=6e-4, d
 
 # This is for gradient accumulation
 total_batch_size = 2**19 # 500K tokens
-B, T = 16, 1024
+B, T = 8, 1024
 
 #The below steps contain the number of steps to accumulate the gradients including multiple GPU steps too
 assert total_batch_size % (B * T * ddp_world_size) == 0, f"Batch size {total_batch_size} is not divisible by B * T = {B * T}"
@@ -551,8 +617,8 @@ for epoch in range(max_steps):
     t0 = time.time()
     last_step = (epoch == max_steps - 1)
 
-    # once in a while evaluate our validation loss
-    if (epoch > 0 and epoch % 1000 == 0) or last_step:
+    ########################## once in a while evaluate our validation loss
+    if ((epoch > 0 and epoch % 1000 == 0) or last_step) and False:
         if master_process:  print("evaluating validation loss:")
         model.eval()
         val_loader.reset()
@@ -578,8 +644,7 @@ for epoch in range(max_steps):
                     wandb.save(f"model_{epoch}.pth")
                     print("Saved model artifact in torch and wandb")
 
-    # once in a while evaluate hellaswag
-    if (epoch > 0 and epoch % 1000 == 0) or last_step:
+        ###################################### once in a while evaluate hellaswag
         if master_process: print('evaluating hellaswag benchmark performance')
         num_correct_norm = 0
         num_total = 0
@@ -613,8 +678,7 @@ for epoch in range(max_steps):
             print(f"HellaSwag accuracy: {num_correct_norm}/{num_total}={hellaswag_accuracy:.4f}")
             if master_process: wandb.log({"hellaswag_accuracy": hellaswag_accuracy})
 
-    # once in a while generate from the model (except epoch 0, which is noise)
-    if (epoch > 0 and epoch % 1000 == 0) or last_step:
+        ################################# once in a while generate from the model (except epoch 0, which is noise)
         model.eval()
         num_return_sequences = 4
         max_length = 32
@@ -674,6 +738,8 @@ for epoch in range(max_steps):
         if ddp: # Sync the gradients only on the last epoch
             model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1) 
         loss.backward() # Do the backward pass and synchronize the gradients.
+        # for name, param in model.named_parameters():
+        #     if param.grad is None: print(f"Parameter {name} is unused.")
 
     # Accumulate loss across all GPUs if using DDP
     if ddp:
@@ -699,8 +765,8 @@ for epoch in range(max_steps):
     best_train_loss_accum = min(best_train_loss_accum, loss_accum)
 
     if master_process:
-        if epoch % 100 == 0:
-            print(f"Epoch: {epoch}, Loss: {loss_accum}, lr: {lr}, norm: {norm}, Time Difference: {(t1 - t0)* 1000}ms, #tokens/sec: {tokens_per_sec}")
+        #if epoch % 100 == 0:
+        print(f"Epoch: {epoch}, Loss: {loss_accum}, lr: {lr}, norm: {norm}, Time Difference: {(t1 - t0)* 1000}ms, #tokens/sec: {tokens_per_sec}")
         # Wandb logging
         wandb.log({
             "train_loss": loss_accum,
@@ -712,9 +778,15 @@ for epoch in range(max_steps):
             "avg_time_per_epoch": avg_time / (epoch + 1),
             "avg_tokens_per_sec": avg_tokens_per_sec / (epoch + 1)
         })
+        if epoch > 0 and (epoch % 1000 == 0 or last_step):
+            if master_process: 
+                # you might also want to add optimizer.state_dict() and
+                # rng seeds etc., if you wanted to more exactly resume training
+                torch.save(raw_model.state_dict(), f"{save_folder}/model_{epoch}.pth")
+                print("Saved model artifact in torch and wandb")
 # %%
 if master_process:
-    wandb.save('final_epoch_model.pth')
+    torch.save(raw_model.state_dict(), f'{save_folder}/final_epoch_model.pth')
     print(f"Average time: {avg_time / max_steps * 1000}ms, Average tokens/sec: {avg_tokens_per_sec / max_steps}")
 
 # Destroy all processes if ddp is true

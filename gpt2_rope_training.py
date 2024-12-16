@@ -16,8 +16,23 @@ import os
 from transformers import AutoTokenizer
 import wandb
 import numpy as np
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
 from hellaswag import render_example, iterate_examples
 import tiktoken
+import os
+import re
+
+path = os.path.dirname(os.path.abspath(__file__))
+
+if path != '/fs/nexus-scratch/thilakcm/848k-project':
+    pattern = r'c848k\d+'
+    account = re.findall(pattern, path)[0]
+    save_folder = f'/fs/class-projects/fall2024/cmsc848k/{account}/ROPE'
+    os.makedirs(save_folder, exist_ok=True)
+else:
+    save_folder = '/fs/nexus-scratch/thilakcm/ROPE'
+    os.makedirs(save_folder, exist_ok=True)
 
 #%%
 # This is for distributed data parallelism
@@ -60,7 +75,7 @@ if master_process:
     # Initialize wandb to this project
     wandb.init(project="GPT 2 848K Nexus Cluster")
 
-    wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Flash Attention", "Gelu", "Sinusoidal Positional Encoding"]
+    wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Regular Attention", "Gelu"]
 
 # GPT-2 is a decoder only transformer model
 #This is for MLP block
@@ -79,6 +94,80 @@ class MLP(nn.Module):
         x = self.gelu(x)
         x = self.c_proj(x)
         return x
+
+class RotaryPositionEmbeddings(nn.Module):
+    '''Rotary Position Embeddings, as described in the RoPE paper'''
+    def __init__(self, config, base=10_000):
+        super().__init__()
+        self.base = base
+        self.dim = config.n_embed
+        self.max_seq_len = config.block_size
+        self.config = config
+        self.rope_init()
+    
+    def reset_parameters(self):
+        self.rope_init()
+    
+    def rope_init(self):
+        '''
+        Initialize the RoPE cache with sin and cos values for each position.
+        '''
+        # Compute thetas for sin and cos
+        theta = torch.pow(self.base, -2 * torch.arange(0, self.dim // 2).float() / self.dim)
+        self.register_buffer('theta', theta, persistent=False)
+        self.build_rope_cache()
+    
+    def build_rope_cache(self):
+        '''
+        Build the RoPE cache for the given block size.
+        '''
+        seq_idx = torch.arange(self.max_seq_len, dtype=self.theta.dtype, device=self.theta.device)
+
+        # Compute position * theta for sin and cos
+        # idx_theta = seq_idx.view(-1, 1) * self.theta.view(1, -1) # same functionality as einsum
+        idx_theta = torch.einsum("i, j -> ij", seq_idx, self.theta).float()
+        hs_half = self.config.n_embed // self.config.n_head // 2  # Calculate hs // 2
+        idx_theta = idx_theta[:, :hs_half]  # Slice to match hs_half
+
+        # Precompute sin and cos
+        cache = torch.stack([torch.cos(idx_theta), torch.sin(idx_theta)], dim=-1)  # Shape: [block_size, n_emb // 2, 2]
+        self.register_buffer('cache', cache, persistent=False)
+
+    def forward(self, x):
+        '''
+        Args:
+            x (torch.Tensor): Input tensor of shape [b, seq_len, nh, hs].
+        
+        Returns:
+            torch.Tensor: Rotated tensor of the same shape as input.
+        '''
+        b, seq_len, nh, hs = x.shape  # Extract input dimensions
+        # TODO: if n_emb is 32, nh is 2, hs should be 16 (n_emb // nh) but it is 8, why?
+        # if master_process: print(f"shape of x before reshaping in RoPE: {x.shape}")
+
+        # Slice the RoPE cache to match the sequence length
+        # print(f"shape of cache before slicing in RoPE: {self.cache.shape}")
+        # rope_cache = self.cache[:seq_len].to(x.device)  # Shape: [seq_len, n_emb // 2, 2]
+        rope_cache = self.cache[:seq_len, :hs // 2].to(x.device)
+        # Reshape input for rotation (split last dim into pairs)
+        x = x.reshape(*x.shape[:-1], -1, 2)  # Shape: [b, seq_len, nh, hs // 2, 2]
+        # print(f"shape of x after reshaping in RoPE: {x.shape}")
+        # this or x = x.view(b, seq_len, nh, hs // 2, 2) # Shape: [b, seq_len, nh, hs // 2, 2]
+        # Add singleton dimensions to rope_cache for broadcasting
+        rope_cache = rope_cache.unsqueeze(0).unsqueeze(2)  # Shape: [1, seq_len, 1, h_s // 2, 2]
+        # rope_cache = rope_cache.view(-1, x.size(1), 1, x.size(3), 2)
+        # print(f"Shape of rope_cache in RoPE: {rope_cache.shape}")
+        
+        # Perform the RoPE rotation
+        rotated = torch.stack([
+            x[..., 0] * rope_cache[..., 0] - x[..., 1] * rope_cache[..., 1],  # cos * even - sin * odd
+            x[..., 1] * rope_cache[..., 0] + x[..., 0] * rope_cache[..., 1]   # sin * even + cos * odd
+        ], dim=-1)  # Shape: [b, seq_len, nh, hs // 2, 2]
+
+        # Flatten the last two dimensions back into the original shape
+        # print(f"shape of rotated before flattening in RoPE: {rotated.shape}")
+        # print(f"shape of rotated after flattening in RoPE: {rotated.flatten(-2).shape}")
+        return rotated.flatten(-2).type_as(x)  # Shape: [b, seq_len, nh, hs]
 
 # This is for self attention block
 class CausalSelfAttention(nn.Module):
@@ -102,6 +191,8 @@ class CausalSelfAttention(nn.Module):
         # not really a bias but a mask, but following OpenAI naming convention
         self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size)).view(1, 1, config.block_size, config.block_size)) 
 
+        self.rope = RotaryPositionEmbeddings(config)
+
     def forward(self, x):
         B, T, C = x.size() # Batch size, Sequence Length, Embedding dimensionality (n_embed)
         # d_k = d_v = n_embed // n_head
@@ -114,16 +205,18 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, self.n_embed // self.n_head).transpose(1, 2)  # same for k
         v = v.view(B, T, self.n_head, self.n_embed // self.n_head).transpose(1, 2)  # same for v
 
+        q = self.rope(q)
+        k = self.rope(k)
 
         # Attention mechanism
-        # att = (q @ k.transpose(-2, -1)) * (1.0 / ((k.size(-1)) ** 0.5))
-        # # Masked Attention
-        # att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
-        # att = F.softmax(att, dim=-1)
-        # y = att @ v
+        att = (q @ k.transpose(-2, -1)) * (1.0 / ((k.size(-1)) ** 0.5))
+        # Masked Attention
+        att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+        att = F.softmax(att, dim=-1)
+        y = att @ v
 
         # Flash Attention
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # wow who knew flash attention was so easy to implement
+        # y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # wow who knew flash attention was so easy to implement
         y = y.transpose(1, 2).contiguous().view(B, T, self.n_head * (self.n_embed // self.n_head))
         # Output projection
         y = self.c_proj(y)
@@ -166,6 +259,7 @@ class GPT(nn.Module):
         # Developing Transformer
         self.transformer = nn.ModuleDict({
             'wte': nn.Embedding(config.vocab_size, config.n_embed), # Token embedding weights
+            'wpe': nn.Embedding(config.block_size, config.n_embed), # Positional embedding weights
             'h': nn.ModuleList([Block(config) for _ in range(config.n_layer)]), # All transformer blocks
             'ln_f': nn.LayerNorm(config.n_embed)
         })
@@ -199,33 +293,15 @@ class GPT(nn.Module):
             # if module.padding_idx is not None:
             #     torch.nn.init.zeros_(module.weight[module.padding_idx])
 
-    def get_sinusoidal_encoding(self, T):
-        # Generate position indices
-        position = torch.arange(0, T, dtype=torch.float).unsqueeze(1)  # Shape: (T, 1)
-        # Generate the scaling terms based on the embedding dimension
-        div_term = 10000 ** (-2 * torch.arange(self.config.n_embed // 2) / self.config.n_embed)  # Shape: (config.n_embed // 2,)
-        
-        # Initialize encoding tensor
-        encoding = torch.zeros(T, self.config.n_embed)  # Shape: (T, config.n_embed)
-        # Apply sine to even indices, cosine to odd indices
-        encoding[:, 0::2] = torch.sin(position * div_term)  # Even indices
-        encoding[:, 1::2] = torch.cos(position * div_term)  # Odd indices
-        return encoding
-
-
     def forward(self, idx, targets=None):
         B, T = idx.size()
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, model block size is {self.config.block_size}"
 
-        # Token Embeddings
-        tok_emb = self.transformer.wte(idx)  # Token Embeddings of shape (B, T, n_embed)
-
-        # Sinusoidal Positional Encodings
-        pos_emb = self.get_sinusoidal_encoding(T).to(idx.device)#, self.config.n_embed, idx.device)  # (T, n_embed)
-        pos_emb = pos_emb.unsqueeze(0).expand(B, -1, -1)  # Broadcast along batch dimension
-
-        # Combine token and positional embeddings
-        x = tok_emb + pos_emb
+        # IMP: Token and Positional Embeddings
+        # pos = torch.arange(0, T, device=idx.device, dtype=torch.long)
+        # pos_emb = self.transformer.wpe(pos)  #Positional Embeddings of shape (T, n_embed)
+        tok_emb = self.transformer.wte(idx)  #Token Embeddings of shape (B, T, n_embed)
+        x = tok_emb # + pos_emb # broadcast along the batch dimension
 
         # Forward pass through each transformer block
         for block in self.transformer.h:
@@ -344,8 +420,6 @@ def compare(model, device):
                 assert torch.allclose(sd[k], sd_hf[k], atol=1e-5), f"Weight mismatch for key: {k}"
     print("All weights match")
 ########################################################################################
-
-
 
 def load_tokens(filename):
     try: npt = np.load(filename, allow_pickle=True)
@@ -471,14 +545,14 @@ model = torch.compile(model)
  
 # This is for ddp
 if ddp:
-    model = DDP(model, device_ids=[ddp_local_rank], output_device=ddp_local_rank)
+    model = DDP(model, device_ids=[ddp_local_rank], output_device=ddp_local_rank, find_unused_parameters=True)
 raw_model = model.module if ddp else model # Always contains the "raw" unwrapped model
 
 # learning rate scheduler parameters
 max_lr = 6e-4
 min_lr = max_lr / 10
 warmup_steps = 715
-max_steps = 19073 #19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+max_steps = 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
 # 20 is used for testing purposes
 
 # cosine annealing learning rate scheduler
@@ -500,7 +574,7 @@ optimizer = raw_model.configure_optimizers(weight_decay=weight_decay, lr=6e-4, d
 
 # This is for gradient accumulation
 total_batch_size = 2**19 # 500K tokens
-B, T = 16, 1024
+B, T = 32, 1024
 
 #The below steps contain the number of steps to accumulate the gradients including multiple GPU steps too
 assert total_batch_size % (B * T * ddp_world_size) == 0, f"Batch size {total_batch_size} is not divisible by B * T = {B * T}"
@@ -552,7 +626,7 @@ for epoch in range(max_steps):
     last_step = (epoch == max_steps - 1)
 
     # once in a while evaluate our validation loss
-    if (epoch > 0 and epoch % 1000 == 0) or last_step:
+    if (epoch > 0 and epoch % 1000 == 0) or last_step and False:
         if master_process:  print("evaluating validation loss:")
         model.eval()
         val_loader.reset()
@@ -578,8 +652,8 @@ for epoch in range(max_steps):
                     wandb.save(f"model_{epoch}.pth")
                     print("Saved model artifact in torch and wandb")
 
-    # once in a while evaluate hellaswag
-    if (epoch > 0 and epoch % 1000 == 0) or last_step:
+        # once in a while evaluate hellaswag
+
         if master_process: print('evaluating hellaswag benchmark performance')
         num_correct_norm = 0
         num_total = 0
@@ -614,7 +688,7 @@ for epoch in range(max_steps):
             if master_process: wandb.log({"hellaswag_accuracy": hellaswag_accuracy})
 
     # once in a while generate from the model (except epoch 0, which is noise)
-    if (epoch > 0 and epoch % 1000 == 0) or last_step:
+
         model.eval()
         num_return_sequences = 4
         max_length = 32
@@ -651,8 +725,6 @@ for epoch in range(max_steps):
 
     # do one epoch of the optimization
     model.train()    
-    
-    
     optimizer.zero_grad()
     loss_accum = 0.0
     # This is for gradient accumulation
@@ -712,9 +784,17 @@ for epoch in range(max_steps):
             "avg_time_per_epoch": avg_time / (epoch + 1),
             "avg_tokens_per_sec": avg_tokens_per_sec / (epoch + 1)
         })
+        # if epoch > 0 and (epoch % 5000 == 0 or last_step):
+        if epoch >= 0 and (epoch % 1000 == 0 or last_step):
+            if master_process: 
+                # you might also want to add optimizer.state_dict() and
+                # rng seeds etc., if you wanted to more exactly resume training
+                torch.save(raw_model.state_dict(), f"{save_folder}/model_{epoch}.pth")
+                print("Saved model artifact in torch and wandb")
+
 # %%
 if master_process:
-    wandb.save('final_epoch_model.pth')
+    torch.save(raw_model.state_dict(), f'{save_folder}/final_epoch_model.pth')
     print(f"Average time: {avg_time / max_steps * 1000}ms, Average tokens/sec: {avg_tokens_per_sec / max_steps}")
 
 # Destroy all processes if ddp is true

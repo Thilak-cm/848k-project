@@ -60,7 +60,7 @@ if master_process:
     # Initialize wandb to this project
     wandb.init(project="GPT 2 848K Nexus Cluster")
 
-    wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Flash Attention", "Gelu", "Sinusoidal Positional Encoding"]
+    wandb.run.tags = ["GPT2", "124M params", "10B tokens", "Flash Attention", "Gelu", "ALiBi Positional Encoding"]
 
 # GPT-2 is a decoder only transformer model
 #This is for MLP block
@@ -102,6 +102,15 @@ class CausalSelfAttention(nn.Module):
         # not really a bias but a mask, but following OpenAI naming convention
         self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size)).view(1, 1, config.block_size, config.block_size)) 
 
+    def alibi_mask(self, q_shape):
+        # To create an alibi_mask, q* k_T + m * [a - b] where m = 2**(-8/head_number). 
+        # [a - b] is a lower triangular matrix with all negative values.
+        # Why q_shape[2]? Because it contains sequence length 
+        pos = - torch.arange(q_shape[2]).view(-1, 1) + torch.arange(q_shape[2]).view(1, -1)
+        pos = pos.float().masked_fill(pos > 0, float('-inf'))  # Shape: (block_size, block_size)
+        head_m_value = torch.tensor([2.0**(-8/i) for i in torch.linspace(1, 8, self.n_head)])
+        return head_m_value.view(-1, 1, 1) * pos
+
     def forward(self, x):
         B, T, C = x.size() # Batch size, Sequence Length, Embedding dimensionality (n_embed)
         # d_k = d_v = n_embed // n_head
@@ -123,7 +132,7 @@ class CausalSelfAttention(nn.Module):
         # y = att @ v
 
         # Flash Attention
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # wow who knew flash attention was so easy to implement
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=False, attn_mask=self.alibi_mask(q.shape).to(x.device)) # wow who knew flash attention was so easy to implement
         y = y.transpose(1, 2).contiguous().view(B, T, self.n_head * (self.n_embed // self.n_head))
         # Output projection
         y = self.c_proj(y)
@@ -199,33 +208,15 @@ class GPT(nn.Module):
             # if module.padding_idx is not None:
             #     torch.nn.init.zeros_(module.weight[module.padding_idx])
 
-    def get_sinusoidal_encoding(self, T):
-        # Generate position indices
-        position = torch.arange(0, T, dtype=torch.float).unsqueeze(1)  # Shape: (T, 1)
-        # Generate the scaling terms based on the embedding dimension
-        div_term = 10000 ** (-2 * torch.arange(self.config.n_embed // 2) / self.config.n_embed)  # Shape: (config.n_embed // 2,)
-        
-        # Initialize encoding tensor
-        encoding = torch.zeros(T, self.config.n_embed)  # Shape: (T, config.n_embed)
-        # Apply sine to even indices, cosine to odd indices
-        encoding[:, 0::2] = torch.sin(position * div_term)  # Even indices
-        encoding[:, 1::2] = torch.cos(position * div_term)  # Odd indices
-        return encoding
-
-
     def forward(self, idx, targets=None):
         B, T = idx.size()
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, model block size is {self.config.block_size}"
 
-        # Token Embeddings
-        tok_emb = self.transformer.wte(idx)  # Token Embeddings of shape (B, T, n_embed)
-
-        # Sinusoidal Positional Encodings
-        pos_emb = self.get_sinusoidal_encoding(T).to(idx.device)#, self.config.n_embed, idx.device)  # (T, n_embed)
-        pos_emb = pos_emb.unsqueeze(0).expand(B, -1, -1)  # Broadcast along batch dimension
-
-        # Combine token and positional embeddings
-        x = tok_emb + pos_emb
+        # IMP: Token and Positional Embeddings
+        pos = torch.arange(0, T, device=idx.device, dtype=torch.long)
+        pos_emb = self.transformer.wpe(pos)  #Positional Embeddings of shape (T, n_embed)
+        tok_emb = self.transformer.wte(idx)  #Token Embeddings of shape (B, T, n_embed)
+        x = tok_emb + pos_emb # broadcast along the batch dimension
 
         # Forward pass through each transformer block
         for block in self.transformer.h:
@@ -474,11 +465,15 @@ if ddp:
     model = DDP(model, device_ids=[ddp_local_rank], output_device=ddp_local_rank)
 raw_model = model.module if ddp else model # Always contains the "raw" unwrapped model
 
+if master_process:
+    for name, param in raw_model.named_parameters():
+        print(f"Layer: {name} | Number of parameters: {param.numel()}")
+
 # learning rate scheduler parameters
 max_lr = 6e-4
 min_lr = max_lr / 10
 warmup_steps = 715
-max_steps = 19073 #19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+max_steps = 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
 # 20 is used for testing purposes
 
 # cosine annealing learning rate scheduler
@@ -699,8 +694,7 @@ for epoch in range(max_steps):
     best_train_loss_accum = min(best_train_loss_accum, loss_accum)
 
     if master_process:
-        if epoch % 100 == 0:
-            print(f"Epoch: {epoch}, Loss: {loss_accum}, lr: {lr}, norm: {norm}, Time Difference: {(t1 - t0)* 1000}ms, #tokens/sec: {tokens_per_sec}")
+        print(f"Epoch: {epoch}, Loss: {loss_accum}, lr: {lr}, norm: {norm}, Time Difference: {(t1 - t0)* 1000}ms, #tokens/sec: {tokens_per_sec}")
         # Wandb logging
         wandb.log({
             "train_loss": loss_accum,
@@ -720,3 +714,55 @@ if master_process:
 # Destroy all processes if ddp is true
 if ddp: 
     destroy_process_group()
+
+
+# # %%
+# ########################################################################################
+# # Loading a pretrained model and generating text
+# # Generate text
+
+# model = GPT.from_pretrained('gpt2')
+# model.eval()
+# model.to(device)
+# compare(model, device)
+
+# max_length = 30 # Maximum length of the generated text
+# num_return_sequences = 5 # Number of different answers to generate
+
+# # Prefix tokens
+# from transformers import AutoTokenizer
+# tokenizer = AutoTokenizer.from_pretrained('gpt2')
+
+# tokens = tokenizer.encode("So, this morning I started studying for the interview in the lab. This was not", return_tensors='pt') # (8,)
+# # tokens = torch.tensor(tokens, dtype=torch.long)
+# # Repeat the tokens for the number of return sequences
+# tokens = tokens.repeat(num_return_sequences, 1)  # (5, 8)
+# x = tokens.to('cuda')
+
+# # Another way
+# # import tiktoken
+# # enc = tiktoken.get_encoding('gpt2')
+# # tokens = enc.encode("Hello, I'm a language model,")
+# # tokens = torch.tensor(tokens, dtype=torch. long) # (8. )
+# # tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # (5, 8)
+# # x = tokens.to('cuda')
+
+
+# # x - (B, T) - (Batch Size, Sequence Length)
+# torch.manual_seed(42)
+# torch.cuda.manual_seed(42)
+# while x.size(1) < max_length:
+#     model.eval()
+#     with torch.no_grad():
+#         logits = model(x)[0] #x, loss
+#         probs = F.softmax(logits[:, -1, :], dim=-1)
+#         topk_probs, topk_indices = torch.topk(probs, k=50, dim=-1)  #k=50 is GPT-2 default
+#         ix = torch.multinomial(topk_probs, num_samples=1)
+#         xcol = torch.gather(topk_indices, -1, ix)
+#         x = torch.cat((x, xcol), dim=1)
+
+# #print generated text
+# for i in range(num_return_sequences):
+#     print(tokenizer.decode(x[i, :].tolist()))
+#     # print(enc.decode(x[i, :].tolist()))
+# ########################################################################################
