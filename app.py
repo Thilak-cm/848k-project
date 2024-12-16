@@ -12,7 +12,7 @@ from Model_Architectures.learnedPE_arch import learned_pe_GPT
 from Model_Architectures.fire_arch import fire_GPT
 from Model_Architectures.kerple_arch import kerple_GPT
 
-# Title
+# Title of the app
 st.title("Our 848K project: GPT-2 Unveiled: Comparative Insights")
 
 # Sidebar for model selection
