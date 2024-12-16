@@ -196,7 +196,12 @@ class FIRE(nn.Module):
         # Progressive interpolation
         normalized_distance = rel_distance / pos_normalizer
         fire_bias = self.mlp(normalized_distance.unsqueeze(-1))
-        fire_bias = fire_bias.unsqueeze(0).permute(0, 3, 1, 2)
+        # The commented and the uncommented code are the same but uncommented code is faster
+        # fire_bias = fire_bias.unsqueeze(0).permute(0, 3, 1, 2)
+        # fire_bias = fire_bias.permute(2, 1, 0).unsqueeze(0)
+        fire_bias = fire_bias.permute(2, 0, 1)
+        mask = torch.ones(seq_length, seq_length).tril(diagonal=0).repeat(fire_bias.shape[0], 1, 1)
+        fire_bias = fire_bias.masked_fill(mask.logical_not().to(device), float('-inf')).unsqueeze(0)
         return fire_bias
     
 # This is for transformer block
