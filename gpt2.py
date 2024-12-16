@@ -110,7 +110,8 @@ class CausalSelfAttention(nn.Module):
         q, k, v = self.c_attn(x).split(self.n_embed, dim=2)  # B x T x n_embed -> B x T x 3*n_embed -> q, k, v each of shape B x T x n_embed
         # hs (head size) = n_embed // n_head
         # C == n_emb == n_head * hs == n_head * d_k == n_head * d_v
-        q = q.view(B, T, self.n_head, self.n_embed // self.n_head).transpose(1, 2)  # q (BxTxC) reshaped to B x T x n_head x hs then transposed to B x n_head x T x hs
+        # q (BxTxC) reshaped to B x T x n_head x hs then transposed to B x n_head x T x hs
+        q = q.view(B, T, self.n_head, self.n_embed // self.n_head).transpose(1, 2)  # B x n_head x T x hs
         k = k.view(B, T, self.n_head, self.n_embed // self.n_head).transpose(1, 2)  # same for k
         v = v.view(B, T, self.n_head, self.n_embed // self.n_head).transpose(1, 2)  # same for v
 
