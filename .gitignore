@@ -12,5 +12,5 @@ slurm*
 model.pth
 gpt2_ak_coding_test.py
 log/
-saved final models/
+saved_final_models/
 test*
