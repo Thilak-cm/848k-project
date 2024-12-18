@@ -17,6 +17,8 @@ Inspired by Andrej Karpathy's "make more" series, this project explores key adva
 
 - **Extensive Logging with Weights & Biases (WandB):**  
   WandB enabled us to track, log, and compare experiments seamlessly. Check out our project dashboard [here](https://wandb.ai/GPT2_848K/GPT%202%20848K%20Nexus%20Cluster?nw=nwuserthilakcm212).
+  This is how our wandb page looks like
+  ![WandB 848K Project Dashboard](wandb_848k_ss.png)
 
 ---
 
