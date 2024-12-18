@@ -14,7 +14,7 @@ from model_architectures.fire_arch import fire_GPT
 from model_architectures.kerple_arch import kerple_GPT
 
 
-repo_id = "thillsss/848k-models"  # Your Hugging Face model repo
+repo_id = "thillsss/848k-models"
 
 # Title of the app
 st.title("Our 848K project: GPT-2 Unveiled: Comparative Insights")
